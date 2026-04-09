@@ -1903,13 +1903,14 @@ class Vic3Logic:
             else:
                 hq_region_val = clean_region_str
             immersive_name = self.generate_immersive_name(clean_region_str, f_type)
+            formatted_units = "\n\t\t".join(unit_buffer)
             block_str = f"""
 \tcreate_military_formation = {{
 \t\tname = {immersive_name}
 \t\ttype = {f_type}
 \t\thq_region = {hq_region_val}
 \t\t# Transferred Units
-\t\t{"\n\t\t".join(unit_buffer)}
+\t\t{formatted_units}
 \t}}
 """
             last_tag_pos = -1
