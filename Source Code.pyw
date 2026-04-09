@@ -625,7 +625,7 @@ class Vic3Logic:
         os.makedirs(def_dir, exist_ok=True)
         def_file = os.path.join(def_dir, f"99_auto_{tag.lower()}.txt")
         def_content =  f"{tag} = {{\n"
-        def_content += f"\tcolor = \{ {r_i} {g_i} {b_i} }\n"
+        def_content += f"\tcolor = {{ {r_i} {g_i} {b_i} }}\n"
         def_content += f"\tcountry_type = {country_type}\n"
         def_content += f"\ttier = {tier}\n"
         def_content += f"\tcultures = {{ {cultures_str} }}\n"
@@ -674,7 +674,7 @@ class Vic3Logic:
             if ext_data["institutions"]:
                 inst_str = "\n\t" + "\n\t".join(list(dict.fromkeys(ext_data["institutions"])))
 
-        if not laws_block
+        if not laws_block:
             if gov_type == "monarchy":
                 laws_block += f"\tactivate_law = law_type:law_monarchy\n"
                 laws_block += f"\tactivate_law = law_type:law_autocracy\n"
@@ -749,23 +749,16 @@ class Vic3Logic:
         pop_content += f"\t}}\n"
         pop_content += f"}}\n"
 
-        pop_content = f"""POPULATION = {{
-    c:{tag} = {{
-        {pop_effects}
-    }}
-}}
-"""
         with open(pop_file, 'w', encoding='utf-8-sig') as f: f.write(pop_content)
 
         # Flag
         flag_dir = os.path.join(self.mod_path, "common/coat_of_arms/coat_of_arms")
         os.makedirs(flag_dir, exist_ok=True)
         flag_file = os.path.join(flag_dir, f"99_auto_{tag.lower()}.txt")
-        flag_content = f"""{tag} = {{
-    pattern = "pattern_solid.tga"
-    color1 = "{flag_color_name}"
-}}
-"""
+        flag_content = f"{tag} = {{\n"
+        flag_content += f"\tpattern = \"pattern_solid.tga\"\n"
+        flag_content += f"\tcolor1 = \"{flag_color_name}\"\n"
+        flag_content += f"}}\n"
         with open(flag_file, 'w', encoding='utf-8-sig') as f: f.write(flag_content)
 
     def _get_location_data(self, tag, target_state):
@@ -803,26 +796,23 @@ class Vic3Logic:
         units_block = ""
         # Using state_region and count per the Paradox example
         if inf > 0:
-            units_block += f"""
-                combat_unit = {{
-                    type = unit_type:combat_unit_type_line_infantry
-                    state_region = s:{final_state}
-                    count = {inf}
-                }}"""
+            units_block += f"\n                combat_unit = {{\n"
+            units_block += f"                    type = unit_type:combat_unit_type_line_infantry\n"
+            units_block += f"                    state_region = s:{final_state}\n"
+            units_block += f"                    count = {inf}\n"
+            units_block += f"                }}"
         if art > 0:
-            units_block += f"""
-                combat_unit = {{
-                    type = unit_type:combat_unit_type_cannon_artillery
-                    state_region = s:{final_state}
-                    count = {art}
-                }}"""
+            units_block += f"\n                combat_unit = {{\n"
+            units_block += f"                    type = unit_type:combat_unit_type_cannon_artillery\n"
+            units_block += f"                    state_region = s:{final_state}\n"
+            units_block += f"                    count = {art}\n"
+            units_block += f"                }}"
         if cav > 0:
-            units_block += f"""
-                combat_unit = {{
-                    type = unit_type:combat_unit_type_hussars
-                    state_region = s:{final_state}
-                    count = {cav}
-                }}"""
+            units_block += f"\n                combat_unit = {{\n"
+            units_block += f"                    type = unit_type:combat_unit_type_hussars\n"
+            units_block += f"                    state_region = s:{final_state}\n"
+            units_block += f"                    count = {cav}\n"
+            units_block += f"                }}"
 
         mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
         os.makedirs(mil_dir, exist_ok=True)
@@ -830,17 +820,16 @@ class Vic3Logic:
         mil_file = os.path.join(mil_dir, f"99_auto_army_{tag.lower()}_{safe_name}.txt")
 
         # Wrapper MILITARY_FORMATIONS added with ?=
-        content = f"""MILITARY_FORMATIONS = {{
-    c:{tag} ?= {{
-        create_military_formation = {{
-            name = "{army_name}"
-            type = army
-            hq_region = {hq_region}
-            {units_block}
-        }}
-    }}
-}}
-"""
+        content = f"MILITARY_FORMATIONS = {{\n"
+        content += f"    c:{tag} ?= {{\n"
+        content += f"        create_military_formation = {{\n"
+        content += f"            name = \"{army_name}\"\n"
+        content += f"            type = army\n"
+        content += f"            hq_region = {hq_region}\n"
+        content += f"            {units_block}\n"
+        content += f"        }}\n"
+        content += f"    }}\n"
+        content += f"}}\n"
         with open(mil_file, 'w', encoding='utf-8-sig') as f: f.write(content)
         self.log(f"   [WRITE] {mil_file}", 'success')
 
@@ -856,26 +845,23 @@ class Vic3Logic:
         units_block = ""
         # Using state_region and count
         if manowar > 0:
-            units_block += f"""
-                combat_unit = {{
-                    type = unit_type:combat_unit_type_man_o_war
-                    state_region = s:{final_state}
-                    count = {manowar}
-                }}"""
+            units_block += f"\n                combat_unit = {{\n"
+            units_block += f"                    type = unit_type:combat_unit_type_man_o_war\n"
+            units_block += f"                    state_region = s:{final_state}\n"
+            units_block += f"                    count = {manowar}\n"
+            units_block += f"                }}"
         if frigate > 0:
-            units_block += f"""
-                combat_unit = {{
-                    type = unit_type:combat_unit_type_frigate
-                    state_region = s:{final_state}
-                    count = {frigate}
-                }}"""
+            units_block += f"\n                combat_unit = {{\n"
+            units_block += f"                    type = unit_type:combat_unit_type_frigate\n"
+            units_block += f"                    state_region = s:{final_state}\n"
+            units_block += f"                    count = {frigate}\n"
+            units_block += f"                }}"
         if ironclad > 0:
-            units_block += f"""
-                combat_unit = {{
-                    type = unit_type:combat_unit_type_ironclad
-                    state_region = s:{final_state}
-                    count = {ironclad}
-                }}"""
+            units_block += f"\n                combat_unit = {{\n"
+            units_block += f"                    type = unit_type:combat_unit_type_ironclad\n"
+            units_block += f"                    state_region = s:{final_state}\n"
+            units_block += f"                    count = {ironclad}\n"
+            units_block += f"                }}"
 
         mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
         os.makedirs(mil_dir, exist_ok=True)
@@ -883,17 +869,16 @@ class Vic3Logic:
         mil_file = os.path.join(mil_dir, f"99_auto_navy_{tag.lower()}_{safe_name}.txt")
 
         # Wrapper MILITARY_FORMATIONS added with ?=
-        content = f"""MILITARY_FORMATIONS = {{
-    c:{tag} ?= {{
-        create_military_formation = {{
-            name = "{navy_name}"
-            type = fleet
-            hq_region = {hq_region}
-            {units_block}
-        }}
-    }}
-}}
-"""
+        content = f"MILITARY_FORMATIONS = {{\n"
+        content += f"    c:{tag} ?= {{\n"
+        content += f"        create_military_formation = {{\n"
+        content += f"            name = \"{navy_name}\"\n"
+        content += f"            type = fleet\n"
+        content += f"            hq_region = {hq_region}\n"
+        content += f"            {units_block}\n"
+        content += f"        }}\n"
+        content += f"    }}\n"
+        content += f"}}\n"
         with open(mil_file, 'w', encoding='utf-8-sig') as f: f.write(content)
         self.log(f"   [WRITE] {mil_file}", 'success')
 
@@ -1916,15 +1901,13 @@ class Vic3Logic:
                 hq_region_val = clean_region_str
             immersive_name = self.generate_immersive_name(clean_region_str, f_type)
             formatted_units = "\n\t\t".join(unit_buffer)
-            block_str = f"""
-\tcreate_military_formation = {{
-\t\tname = {immersive_name}
-\t\ttype = {f_type}
-\t\thq_region = {hq_region_val}
-\t\t# Transferred Units
-\t\t{formatted_units}
-\t}}
-"""
+            block_str = f"\tcreate_military_formation = {{\n"
+            block_str += f"\t\tname = {immersive_name}\n"
+            block_str += f"\t\ttype = {f_type}\n"
+            block_str += f"\t\thq_region = {hq_region_val}\n"
+            block_str += f"\t\t# Transferred Units\n"
+            block_str += f"\t\t{formatted_units}\n"
+            block_str += f"\t}}\n"
             last_tag_pos = -1
             curr = 0
             while True:
@@ -2846,14 +2829,13 @@ class Vic3Logic:
             # Create new ruler block if none found (overrides/adds to vanilla)
             # Default birth_date needed if creating fresh
             ideo_line = f"\n            ideology = {ruler_info['ideology']}" if ruler_info['ideology'] else ""
-            new_ruler_block = f"""
-        create_character = {{
-            first_name = "{ruler_info['first']}"
-            last_name = "{ruler_info['last']}"
-            birth_date = 1800.1.1
-            ruler = yes
-            interest_group = {ruler_info['ig']}{ideo_line}
-        }}"""
+            new_ruler_block = f"\n        create_character = {{\n"
+            new_ruler_block += f"            first_name = \"{ruler_info['first']}\"\n"
+            new_ruler_block += f"            last_name = \"{ruler_info['last']}\"\n"
+            new_ruler_block += f"            birth_date = 1800.1.1\n"
+            new_ruler_block += f"            ruler = yes\n"
+            new_ruler_block += f"            interest_group = {ruler_info['ig']}{ideo_line}\n"
+            new_ruler_block += f"        }}"
             # Insert before closing brace of country block
             new_block = new_block[:new_block.rfind('}')] + new_ruler_block + "\n\t}"
 
@@ -3497,19 +3479,17 @@ class Vic3Logic:
             v = name_data.get(k, "")
             names_block += f"\t{k} = {{ {v} }}\n"
 
-        content_block = f"""
-{key} = {{
-\tcolor = rgb{{ {color[0]} {color[1]} {color[2]} }}
-\treligion = {religion}
-\theritage = {heritage}
-\tlanguage = {language}
-\ttraditions = {{ {t_str} }}
-\tgraphics = {graphics}
-\tobsessions = {{}}
-\tethnicities = {{
-{eth_str}\t}}
-{names_block}}}
-"""
+        content_block = f"\n{key} = {{\n"
+        content_block += f"\tcolor = rgb{{ {color[0]} {color[1]} {color[2]} }}\n"
+        content_block += f"\treligion = {religion}\n"
+        content_block += f"\theritage = {heritage}\n"
+        content_block += f"\tlanguage = {language}\n"
+        content_block += f"\ttraditions = {{ {t_str} }}\n"
+        content_block += f"\tgraphics = {graphics}\n"
+        content_block += f"\tobsessions = {{}}\n"
+        content_block += f"\tethnicities = {{\n"
+        content_block += f"{eth_str}\t}}\n"
+        content_block += f"{names_block}}}\n"
         # Append or Create
         mode = 'a' if os.path.exists(fpath) else 'w'
         try:
@@ -3544,13 +3524,11 @@ class Vic3Logic:
 
         r, g, b = color[0]/255.0, color[1]/255.0, color[2]/255.0
 
-        content_block = f"""
-{key} = {{
-\ticon = "{icon_path}"
-\theritage = {heritage}
-\tcolor = {{ {r:.2f} {g:.2f} {b:.2f} }}
-}}
-"""
+        content_block = f"\n{key} = {{\n"
+        content_block += f"\ticon = \"{icon_path}\"\n"
+        content_block += f"\theritage = {heritage}\n"
+        content_block += f"\tcolor = {{ {r:.2f} {g:.2f} {b:.2f} }}\n"
+        content_block += f"}}\n"
         mode = 'a' if os.path.exists(fpath) else 'w'
         try:
             with open(fpath, mode, encoding='utf-8-sig') as f:
@@ -3902,28 +3880,26 @@ class Vic3Logic:
 
         members_str = "\n\t\t\t".join([f"member = {m}" for m in filtered_members])
 
-        create_block = f"""
-\t\tcreate_power_bloc = {{
-\t\t\tname = {name_key}
-\t\t\tmap_color = {map_col_str}
-\t\t\tfounding_date = {data['date']}
-\t\t\tidentity = {data['identity']}
-\t\t\tprinciple = {principle_1}
-\t\t\t{members_str}
-\t\t}}"""
+        create_block = f"\n\t\tcreate_power_bloc = {{\n"
+        create_block += f"\t\t\tname = {name_key}\n"
+        create_block += f"\t\t\tmap_color = {map_col_str}\n"
+        create_block += f"\t\t\tfounding_date = {data['date']}\n"
+        create_block += f"\t\t\tidentity = {data['identity']}\n"
+        create_block += f"\t\t\tprinciple = {principle_1}\n"
+        create_block += f"\t\t\t{members_str}\n"
+        create_block += f"\t\t}}"
 
         extra_block = ""
         if extra_principles:
             adds = "\n\t\t\t\t".join([f"add_principle = {p}" for p in extra_principles])
-            extra_block = f"""
-\t\tif = {{
-\t\t\tlimit = {{
-\t\t\t\thas_dlc_feature = power_bloc_features
-\t\t\t}}
-\t\t\tpower_bloc = {{
-\t\t\t\t{adds}
-\t\t\t}}
-\t\t}}"""
+            extra_block = f"\n\t\tif = {{\n"
+            extra_block += f"\t\t\tlimit = {{\n"
+            extra_block += f"\t\t\t\thas_dlc_feature = power_bloc_features\n"
+            extra_block += f"\t\t\t}}\n"
+            extra_block += f"\t\t\tpower_bloc = {{\n"
+            extra_block += f"\t\t\t\t{adds}\n"
+            extra_block += f"\t\t\t}}\n"
+            extra_block += f"\t\t}}"
 
         # Locate country block
         s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
@@ -4757,12 +4733,11 @@ class Vic3Logic:
                 size = int((pct / 100.0) * owner_total)
                 if size <= 0: continue
 
-                new_pops_str += f"""
-		create_pop = {{
-			culture = {d['culture']}
-			religion = {d['religion']}
-			size = {size}
-		}}"""
+                new_pops_str += f"\n\t\tcreate_pop = {{\n"
+                new_pops_str += f"\t\t\tculture = {d['culture']}\n"
+                new_pops_str += f"\t\t\treligion = {d['religion']}\n"
+                new_pops_str += f"\t\t\tsize = {size}\n"
+                new_pops_str += f"\t\t}}"
 
             if not new_pops_str: continue
 
@@ -5585,12 +5560,10 @@ class Vic3Logic:
                 break
 
         if target_tag:
-            visibility_block = f"""
-\tis_shown_when_inactive = {{
-\t\texists = c:{target_tag}
-\t\tthis = c:{target_tag}
-\t}}
-"""
+            visibility_block = f"\tis_shown_when_inactive = {{\n"
+            visibility_block += f"\t\texists = c:{target_tag}\n"
+            visibility_block += f"\t\tthis = c:{target_tag}\n"
+            visibility_block += f"\t}}\n"
             # Also add to history file
             self.add_journal_entry_to_history(target_tag, je_id)
 
@@ -5609,22 +5582,18 @@ class Vic3Logic:
         for item in entry_data['rewards']:
             effect_block += f"\t\t{item}\n"
 
-        entry_content = f"""
-{je_id} = {{
-\tgroup = je_group_objectives
-\ticon = "gfx/interface/icons/event_icons/event_default.dds"
-\tcan_revolution_inherit = yes
-{visibility_block}
-\tpossible = {{
-{possible_block}\t}}
-
-\tcomplete = {{
-{complete_block}\t}}
-
-\ton_complete = {{
-{effect_block}\t}}
-}}
-"""
+        entry_content = f"\n{je_id} = {{\n"
+        entry_content += f"\tgroup = je_group_objectives\n"
+        entry_content += f"\ticon = \"gfx/interface/icons/event_icons/event_default.dds\"\n"
+        entry_content += f"\tcan_revolution_inherit = yes\n"
+        entry_content += f"{visibility_block}"
+        entry_content += f"\tpossible = {{\n"
+        entry_content += f"{possible_block}\t}}\n\n"
+        entry_content += f"\tcomplete = {{\n"
+        entry_content += f"{complete_block}\t}}\n\n"
+        entry_content += f"\ton_complete = {{\n"
+        entry_content += f"{effect_block}\t}}\n"
+        entry_content += f"}}\n"
 
         try:
             current_content = ""
@@ -5733,29 +5702,24 @@ class Vic3Logic:
             for gen_eff in opt.get('general_effects', []):
                 effects += f"\n\t\t{gen_eff}"
 
-            opt_str += f"""
-    option = {{
-        name = {opt_loc_id}
-        {effects}
-    }}"""
+            opt_str += f"\n    option = {{\n"
+            opt_str += f"        name = {opt_loc_id}\n"
+            opt_str += f"        {effects}\n"
+            opt_str += f"    }}"
 
         # 4. Construct Event Block
         # Update event_image to user specifications
-        event_content = f"""
-{event_id} = {{
-    type = country_event
-    title = {event_id}.t
-    desc = {event_id}.d
-    flavor = {event_id}.f
-
-    event_image = {{
-        video = "{image}"
-        icon = "gfx/interface/icons/event_icons/event_default.dds"
-    }}
-
-{opt_str}
-}}
-"""
+        event_content = f"\n{event_id} = {{\n"
+        event_content += f"    type = country_event\n"
+        event_content += f"    title = {event_id}.t\n"
+        event_content += f"    desc = {event_id}.d\n"
+        event_content += f"    flavor = {event_id}.f\n\n"
+        event_content += f"    event_image = {{\n"
+        event_content += f"        video = \"{image}\"\n"
+        event_content += f"        icon = \"gfx/interface/icons/event_icons/event_default.dds\"\n"
+        event_content += f"    }}\n\n"
+        event_content += f"{opt_str}\n"
+        event_content += f"}}\n"
 
         try:
             current_content = ""
@@ -5826,12 +5790,10 @@ class Vic3Logic:
         # Ensure icon uses forward slashes
         icon = icon.replace("\\", "/")
 
-        content = f"""
-{mod_name} = {{
-    icon = "{icon}"
-    {effects}
-}}
-"""
+        content = f"\n{mod_name} = {{\n"
+        content += f"    icon = \"{icon}\"\n"
+        content += f"    {effects}\n"
+        content += f"}}\n"
         try:
             with open(target_file, 'a', encoding='utf-8-sig') as f:
                 f.write(content)
@@ -6410,10 +6372,9 @@ class Vic3Logic:
                     content = content_without_old[:s_idx] + new_state_block + content_without_old[e_idx:]
                 else:
                     # Create new region_state
-                    new_rs = f"""
-\t\tregion_state:{clean_new_land}={{
-{block}
-\t\t}}"""
+                    new_rs = f"\n\t\tregion_state:{clean_new_land}={{\n"
+                    new_rs += f"{block}\n"
+                    new_rs += f"\t\t}}"
                     # Insert at end of state block
                     last_sb_brace = state_block.rfind('}')
                     new_state_block = state_block[:last_sb_brace] + new_rs + "\n\t}"
@@ -6481,12 +6442,11 @@ class Vic3Logic:
         # Construct Building Block
         ownership_block = self.get_ownership_block(building_type, clean_building_owner, level, clean_state)
 
-        new_b_block = f"""
-\t\t\tcreate_building = {{
-\t\t\t\tbuilding = "{building_type}"
-\t\t\t\treserves = 1
-\t\t\t\tactivate_production_methods = {{ }}{ownership_block}
-\t\t\t}}"""
+        new_b_block = f"\n\t\t\tcreate_building = {{\n"
+        new_b_block += f"\t\t\t\tbuilding = \"{building_type}\"\n"
+        new_b_block += f"\t\t\t\treserves = 1\n"
+        new_b_block += f"\t\t\t\tactivate_production_methods = {{ }}{ownership_block}\n"
+        new_b_block += f"\t\t\t}}"
 
         s, e = self.get_block_range_safe(target_content, f"s:{clean_state}")
 
@@ -6515,10 +6475,9 @@ class Vic3Logic:
                 new_state_block = state_block[:rs_insert_idx] + new_b_block + state_block[rs_insert_idx:]
                 target_content = target_content[:s] + new_state_block + target_content[e:]
             else:
-                new_rs = f"""
-\t\tregion_state:{clean_land_owner}={{
-{new_b_block}
-\t\t}}"""
+                new_rs = f"\n\t\tregion_state:{clean_land_owner}={{\n"
+                new_rs += f"{new_b_block}\n"
+                new_rs += f"\t\t}}"
                 new_state_block = state_block[:state_block.rfind('}')] + new_rs + "\n\t}"
                 target_content = target_content[:s] + new_state_block + target_content[e:]
         else:
@@ -7013,12 +6972,11 @@ class Vic3Logic:
                 elif u_type == "ironclad": real_type = "unit_type:combat_unit_type_ironclad"
                 else: real_type = f"unit_type:{u_type}" if not u_type.startswith("unit_type:") else u_type
                 
-                units_str += f"""
-        combat_unit = {{
-            type = {real_type}
-            state_region = {ref_state}
-            count = {u_count}
-        }}"""
+                units_str += f"\n        combat_unit = {{\n"
+                units_str += f"            type = {real_type}\n"
+                units_str += f"            state_region = {ref_state}\n"
+                units_str += f"            count = {u_count}\n"
+                units_str += f"        }}"
 
             new_block = new_block[:last_brace] + units_str + "\n\t}"
             
@@ -7934,15 +7892,14 @@ class StateManager:
         # Only new states generally have one owner covering all provinces initially
         prov_str = " ".join(f'"{p}"' for p in sobj.provinces)
 
-        content = f"""STATES = {{
-    s:{state_id} = {{
-        create_state = {{
-            country = c:{owner_tag}
-            owned_provinces = {{ {prov_str} }}
-        }}
-    }}
-}}
-"""
+        content = f"STATES = {{\n"
+        content += f"    s:{state_id} = {{\n"
+        content += f"        create_state = {{\n"
+        content += f"            country = c:{owner_tag}\n"
+        content += f"            owned_provinces = {{ {prov_str} }}\n"
+        content += f"        }}\n"
+        content += f"    }}\n"
+        content += f"}}\n"
         with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
 
     def _add_to_strategic_region(self, state_id, region_name):
@@ -8285,15 +8242,14 @@ class StateManager:
 
         al_val = sobj.arable_land if sobj.arable_land is not None else 30
 
-        new_block = f"""{state_id} = {{
-    id = 1234
-    provinces = {{ {prov_str} }}
-    subsistence_building = "building_subsistence_farm"{hubs_str}{naval_str}{impass_block}
-    arable_land = {al_val}
-    arable_resources = {{ "bg_wheat_farms" "bg_livestock_ranches" }}
-    capped_resources = {{ "bg_lead_mining" 5 "bg_iron_mining" 5 "bg_logging" 10 }}
-}}
-"""
+        new_block = f"{state_id} = {{\n"
+        new_block += f"    id = 1234\n"
+        new_block += f"    provinces = {{ {prov_str} }}\n"
+        new_block += f"    subsistence_building = \"building_subsistence_farm\"{hubs_str}{naval_str}{impass_block}\n"
+        new_block += f"    arable_land = {al_val}\n"
+        new_block += f"    arable_resources = {{ \"bg_wheat_farms\" \"bg_livestock_ranches\" }}\n"
+        new_block += f"    capped_resources = {{ \"bg_lead_mining\" 5 \"bg_iron_mining\" 5 \"bg_logging\" 10 }}\n"
+        new_block += f"}}\n"
         if re.search(r"(^|\s)" + re.escape(state_id) + r"\s*=\s*\{", content):
             m = re.search(r"(^|\s)" + re.escape(state_id) + r"\s*=\s*\{", content)
             s, e = self.logic.find_block_content(content, m.end() - 1)
