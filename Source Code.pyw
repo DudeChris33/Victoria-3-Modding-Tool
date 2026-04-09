@@ -786,7 +786,7 @@ class Vic3Logic:
 				
 		return final_state, hq_region
 
-	def create_army_file(self, tag, army_name, target_state, inf, art, cav):
+	def create_army_file(self, tag, army_name, target_state, inf, art, cav):	# todo: remove generic name insert
 		"""Creates a new army history file."""
 		self.perform_auto_backup()
 		self.log(f"[GEN] Creating Army '{army_name}' for {tag}...")
@@ -826,11 +826,12 @@ class Vic3Logic:
 		content += f"\t\t\tname = \"{army_name}\"\n"
 		content += f"\t\t\ttype = army\n"
 		content += f"\t\t\thq_region = {hq_region}\n"
-		content += f"\t\t\t{units_block}\n"
+		content += f"{units_block}"
 		content += f"\t\t}}\n"
 		content += f"\t}}\n"
 		content += f"}}\n"
-		with open(mil_file, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with open(mil_file, 'w', encoding='utf-8-sig') as f:
+			f.write(content)
 		self.log(f"   [WRITE] {mil_file}", 'success')
 
 	def create_navy_file(self, tag, navy_name, target_state, manowar, frigate, ironclad):
@@ -875,7 +876,7 @@ class Vic3Logic:
 		content += f"\t\t\tname = \"{navy_name}\"\n"
 		content += f"\t\t\ttype = fleet\n"
 		content += f"\t\t\thq_region = {hq_region}\n"
-		content += f"\t\t\t{units_block}\n"
+		content += f"{units_block}"
 		content += f"\t\t}}\n"
 		content += f"\t}}\n"
 		content += f"}}\n"
@@ -1025,7 +1026,7 @@ class Vic3Logic:
 			os.path.join(self.mod_path, "common/history/military_formations"),
 			os.path.join(self.mod_path, "common/history/characters")
 		]
-		scope_regex = re.compile(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)
+		scope_regex = re.compile(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)
 
 		for p in paths:
 			if not os.path.exists(p): continue
@@ -1162,7 +1163,8 @@ class Vic3Logic:
 							new_lines.append(line)
 					if file_changed:
 						with open(path, 'w', encoding='utf-8-sig') as f: f.write("\n".join(new_lines))
-		if orphans_removed > 0: self.log(f"[SUCCESS] Removed {orphans_removed} orphaned links.", 'success')
+		if orphans_removed > 0:
+			self.log(f"[SUCCESS] Removed {orphans_removed} orphaned links.", 'success')
 
 	def get_all_owned_states(self, tag):
 		states_found = []
@@ -2239,7 +2241,7 @@ class Vic3Logic:
 							updated_block = pat.sub(f'state_region = s:{new_clean}', block)
 
 							# Get Scope ID
-							scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", updated_block)
+							scope_m = re.search(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", updated_block)
 							if scope_m:
 								touched_formations.add(scope_m.group(1))
 
@@ -6712,7 +6714,7 @@ class Vic3Logic:
 								if m_type: f_data["type"] = m_type.group(1)
 
 								# Extract ID
-								m_id = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", form_inner)
+								m_id = re.search(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", form_inner)
 								if m_id: f_data["id"] = m_id.group(1)
 								else:
 									# Generate a temporary pseudo-ID for UI tracking? 
@@ -6828,7 +6830,7 @@ class Vic3Logic:
 				
 				# Check match
 				# 1. ID Match
-				m_id = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", block)
+				m_id = re.search(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", block)
 				if m_id and m_id.group(1) == fid:
 					found_start = abs_start
 					found_end = e
@@ -6894,7 +6896,7 @@ class Vic3Logic:
 				
 				# Match
 				match = False
-				m_id = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", block)
+				m_id = re.search(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", block)
 				if m_id and m_id.group(1) == fid: match = True
 				elif fid.startswith("__internal_"):
 					m_name = re.search(r'name\s*=\s*"([^"]+)"', block)
