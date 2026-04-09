@@ -118,8 +118,8 @@ class Vic3Logic:
                         if not m: break
                         tag = m.group(1).upper()
                         if tag in ["AGENTS", "TIERS", "TYPES", "CULTURES", "RELIGIONS"]: # Skip non-country blocks if any
-                             cursor += m.end()
-                             continue
+                            cursor += m.end()
+                            continue
 
                         start_idx = cursor + m.end() - 1
                         _, end_idx = self.find_block_content(content, start_idx)
@@ -148,9 +148,9 @@ class Vic3Logic:
                                 else:
                                     # rgb 0-255 or 0-1
                                     if v1 <= 1.0 and v2 <= 1.0 and v3 <= 1.0 and (v1 > 0 or v2 > 0 or v3 > 0):
-                                         rgb = (int(v1*255), int(v2*255), int(v3*255))
+                                        rgb = (int(v1*255), int(v2*255), int(v3*255))
                                     else:
-                                         rgb = (int(v1), int(v2), int(v3))
+                                        rgb = (int(v1), int(v2), int(v3))
 
                                 # Mod overrides vanilla
                                 if tag not in colors or p.startswith(self.mod_path):
@@ -305,9 +305,9 @@ class Vic3Logic:
 
                 # Check for country block c:TAG
                 if re.search(r"c:" + re.escape(clean_tag) + r"\b", content):
-                     match = re.search(r"effect_starting_technology_tier_\d+_tech\s*=\s*yes", content)
-                     if match:
-                         return match.group(0)
+                    match = re.search(r"effect_starting_technology_tier_\d+_tech\s*=\s*yes", content)
+                    if match:
+                        return match.group(0)
         return None
 
     def get_pop_history_data(self, tag):
@@ -356,8 +356,8 @@ class Vic3Logic:
         if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/history/population"))
 
         for p in paths:
-             if not os.path.exists(p): continue
-             for root, _, files in os.walk(p):
+            if not os.path.exists(p): continue
+            for root, _, files in os.walk(p):
                 for file in files:
                     if not file.endswith(".txt"): continue
                     path = os.path.join(root, file)
@@ -416,7 +416,7 @@ class Vic3Logic:
             target_file = os.path.join(pop_dir, f"{clean_tag}.txt")
             target_content = f"POPULATION = {{\n\tc:{clean_tag} ?= {{\n\t}}\n}}"
             if os.path.exists(target_file):
-                 with open(target_file, 'r', encoding='utf-8-sig') as f: target_content = f.read()
+                with open(target_file, 'r', encoding='utf-8-sig') as f: target_content = f.read()
 
         # 3. Edit content
         s, e = self.get_block_range_safe(target_content, f"c:{clean_tag}")
@@ -624,27 +624,27 @@ class Vic3Logic:
         def_dir = os.path.join(self.mod_path, "common/country_definitions")
         os.makedirs(def_dir, exist_ok=True)
         def_file = os.path.join(def_dir, f"99_auto_{tag.lower()}.txt")
-        def_content = f"""{tag} = {{
-    color = {{ {r_i} {g_i} {b_i} }}
-    country_type = {country_type}
-    tier = {tier}
-    cultures = {{ {cultures_str} }}
-    religion = {religion}
-    capital = {capital}
-}}
-"""
-        with open(def_file, 'w', encoding='utf-8-sig') as f: f.write(def_content)
+        def_content =  f"{tag} = {{\n"
+        def_content += f"\tcolor = \{ {r_i} {g_i} {b_i} }\n"
+        def_content += f"\tcountry_type = {country_type}\n"
+        def_content += f"\ttier = {tier}\n"
+        def_content += f"\tcultures = {{ {cultures_str} }}\n"
+        def_content += f"\treligion = {religion}\n"
+        def_content += f"\tcapital = {capital}\n"
+        def_content += f"}}\n"
+        with open(def_file, 'w', encoding='utf-8-sig') as f:
+            f.write(def_content)
 
         # Localization
         loc_dir = os.path.join(self.mod_path, "localization/english")
         os.makedirs(loc_dir, exist_ok=True)
         loc_file = os.path.join(loc_dir, f"auto_{tag.lower()}_l_english.yml")
-        loc_content = f"""l_english:
- {tag}: "{name}"
- {tag}_ADJ: "{adjective}"
- {tag}_DEF: "{name}"
-"""
-        with open(loc_file, 'w', encoding='utf-8-sig') as f: f.write(loc_content)
+        loc_content =  f'l_english:\n'
+        loc_content += f' {tag}: "{name}"'
+        loc_content += f' {tag}_ADJ: "{adjective}"'
+        loc_content += f' {tag}_DEF: "{name}"'
+        with open(loc_file, 'w', encoding='utf-8-sig') as f:
+            f.write(loc_content)
 
         # History
         hist_dir = os.path.join(self.mod_path, "common/history/countries")
@@ -674,45 +674,51 @@ class Vic3Logic:
             if ext_data["institutions"]:
                 inst_str = "\n\t" + "\n\t".join(list(dict.fromkeys(ext_data["institutions"])))
 
-        if not laws_block:
-            laws_block = """
-    activate_law = law_type:law_monarchy
-    activate_law = law_type:law_autocracy
-    activate_law = law_type:law_peasant_levies
-    activate_law = law_type:law_land_tax
-""" if gov_type == "monarchy" else """
-    activate_law = law_type:law_presidential_republic
-    activate_law = law_type:law_census_voting
-    activate_law = law_type:law_national_militia
-    activate_law = law_type:law_per_capita_tax
-    activate_law = law_type:law_appointed_bureaucrats
-"""
+        if not laws_block
+            if gov_type == "monarchy":
+                laws_block += f"\tactivate_law = law_type:law_monarchy\n"
+                laws_block += f"\tactivate_law = law_type:law_autocracy\n"
+                laws_block += f"\tactivate_law = law_type:law_peasant_levies\n"
+                laws_block += f"\tactivate_law = law_type:law_land_based_taxation\n"
+            else:
+                laws_block += f"\tactivate_law = law_type:law_presidential_republic\n"
+                laws_block += f"\tactivate_law = law_type:law_census_voting\n"
+                laws_block += f"\tactivate_law = law_type:law_national_militia\n"
+                laws_block += f"\tactivate_law = law_type:law_per_capita_based_taxation\n"
+                laws_block += f"\tactivate_law = law_type:law_appointed_bureaucrats\n"
 
         if not tech_tier_str:
-             tech_tier_str = "effect_starting_technology_tier_1_tech = yes"
+            tech_tier_str = "effect_starting_technology_tier_1_tech = yes"
 
-        ig_ruler = "ig_landowners" if gov_type == "monarchy" else "ig_intelligentsia"
+        if gov_type == "monarchy":
+            ig_ruler = "ig_landowners"
+        else:
+            ig_ruler = "ig_intelligentsia"
 
-        hist_content = f"""COUNTRIES = {{
-    c:{tag} ?= {{
-        {tech_tier_str}
-        set_tax_level = medium
-        {laws_block}
-        {politics_str}
-        {techs_res_str}
-        {inst_str}
+        hist_content =  f'COUNTRIES = {{'
+        hist_content += f'\tc:{tag} ?= {{\n'
+        hist_content += f'\t\t{tech_tier_str}\n'
+        hist_content += f'\t\t{techs_res_str}\n'
+        hist_content += f'\n'
+        hist_content += f'\t\t{politics_str}\n'
+        hist_content += f'\t\t{laws_block}\n'
+        hist_content += f'\n'
+        hist_content += f'\t\t{inst_str}\n'
+        hist_content += f'\n'
+        hist_content += f'\t\tset_tax_level = medium\n'
+        hist_content += f'\n'
+        hist_content += f'\t\tcreate_character = {{\n'
+        hist_content += f'\t\t\tfirst_name = "Alexander"\n'
+        hist_content += f'\t\t\tlast_name = "Modman"\n'
+        hist_content += f'\t\t\tbirth_date = 1800.1.1\n'
+        hist_content += f'\t\t\truler = yes\n'
+        hist_content += f'\t\t\tinterest_group = {ig_ruler}\n'
+        hist_content += f'\t\t}}\n'
+        hist_content += f'\t}}\n'
+        hist_content += f'}}\n'
 
-        create_character = {{
-            first_name = "Alexander"
-            last_name = "Modman"
-            birth_date = 1800.1.1
-            ruler = yes
-            interest_group = {ig_ruler}
-        }}
-    }}
-}}
-"""
-        with open(hist_file, 'w', encoding='utf-8-sig') as f: f.write(hist_content)
+        with open(hist_file, 'w', encoding='utf-8-sig') as f:
+            f.write(hist_content)
 
         # Population History
         pop_dir = os.path.join(self.mod_path, "common/history/population")
@@ -730,12 +736,18 @@ class Vic3Logic:
             # Use defaults if one is missing but other is provided?
             # Or just use what is given.
             if not pop_effects: # Should not happen if wealth or literacy is true
-                 pop_effects = "effect_starting_pop_wealth_medium = yes\n\t\teffect_starting_pop_literacy_medium = yes"
+                pop_effects = "effect_starting_pop_wealth_medium = yes\n\t\teffect_starting_pop_literacy_medium = yes"
         else:
             # Fallback to copy from old tag
             pop_effects = self.get_pop_history_data(old_tag)
             if not pop_effects:
-                 pop_effects = "effect_starting_pop_wealth_medium = yes\n\t\teffect_starting_pop_literacy_medium = yes"
+                pop_effects = "effect_starting_pop_wealth_medium = yes\n\t\teffect_starting_pop_literacy_medium = yes"
+
+        pop_content =  f"POPULATION = {{\n"
+        pop_content += f"\tc:{tag} = {{\n"
+        pop_content += f"\t\t{pop_effects}\n"
+        pop_content += f"\t}}\n"
+        pop_content += f"}}\n"
 
         pop_content = f"""POPULATION = {{
     c:{tag} = {{
@@ -1102,7 +1114,7 @@ class Vic3Logic:
                 try:
                     with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
                 except:
-                     with open(path, 'r', encoding='utf-8') as f: content = f.read()
+                    with open(path, 'r', encoding='utf-8') as f: content = f.read()
 
                 if re.search(r"c:" + re.escape(clean_tag) + r"\b", content):
                     target_file = path
@@ -1114,19 +1126,19 @@ class Vic3Logic:
             # Check for railway tech
             # Match "add_technology_researched = railways" or "add_technology = railways"
             if "railways" not in target_content:
-                 # More precise check?
-                 # Just append to country block
-                 s, e = self.get_block_range_safe(target_content, f"c:{clean_tag}")
-                 if s is not None:
-                     block = target_content[s:e]
-                     if not re.search(r"add_technology(_researched)?\s*=\s*railways", block):
-                         # Insert
-                         lb = block.rfind('}')
-                         new_block = block[:lb] + "\n\t\tadd_technology_researched = railways\n\t}"
-                         target_content = target_content[:s] + new_block + target_content[e:]
+                # More precise check?
+                # Just append to country block
+                s, e = self.get_block_range_safe(target_content, f"c:{clean_tag}")
+                if s is not None:
+                    block = target_content[s:e]
+                    if not re.search(r"add_technology(_researched)?\s*=\s*railways", block):
+                        # Insert
+                        lb = block.rfind('}')
+                        new_block = block[:lb] + "\n\t\tadd_technology_researched = railways\n\t}"
+                        target_content = target_content[:s] + new_block + target_content[e:]
 
-                         with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(target_content)
-                         self.log(f"[TECH] Added railways to {clean_tag}")
+                        with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(target_content)
+                        self.log(f"[TECH] Added railways to {clean_tag}")
 
     def prune_orphaned_commanders(self, valid_scopes):
         paths = [
@@ -1220,13 +1232,13 @@ class Vic3Logic:
         clean_state = state_name.replace("s:", "").strip()
 
         if building_type in self.CAT_A_STATE:
-             return f'country = {{ country = "c:{clean_owner}" levels = {level} }}'
+            return f'country = {{ country = "c:{clean_owner}" levels = {level} }}'
 
         elif building_type in self.CAT_B_RURAL:
-             return f'building = {{\n\t\t\t\t\t\ttype = "building_manor_house"\n\t\t\t\t\t\tcountry = "c:{clean_owner}"\n\t\t\t\t\t\tlevels = {level}\n\t\t\t\t\t\tregion = "{clean_state}"\n\t\t\t\t\t}}'
+            return f'building = {{\n\t\t\t\t\t\ttype = "building_manor_house"\n\t\t\t\t\t\tcountry = "c:{clean_owner}"\n\t\t\t\t\t\tlevels = {level}\n\t\t\t\t\t\tregion = "{clean_state}"\n\t\t\t\t\t}}'
 
         else: # Category C or Fallback
-             return f'building = {{\n\t\t\t\t\t\ttype = "building_financial_district"\n\t\t\t\t\t\tcountry = "c:{clean_owner}"\n\t\t\t\t\t\tlevels = {level}\n\t\t\t\t\t\tregion = "{clean_state}"\n\t\t\t\t\t}}'
+            return f'building = {{\n\t\t\t\t\t\ttype = "building_financial_district"\n\t\t\t\t\t\tcountry = "c:{clean_owner}"\n\t\t\t\t\t\tlevels = {level}\n\t\t\t\t\t\tregion = "{clean_state}"\n\t\t\t\t\t}}'
 
     def get_ownership_block(self, building_type, owner_tag, level, state_name):
         inner = self.get_ownership_content(building_type, owner_tag, level, state_name)
@@ -1511,12 +1523,12 @@ class Vic3Logic:
                         provinces = old_c[ps+1:pe-1].strip()
                         new_c = content[new_range[0]:new_range[1]]
                         if "owned_provinces" in new_c:
-                             npm = re.search(r"owned_provinces\s*=\s*\{", new_c)
-                             ns, ne = self.find_block_content(new_c, npm.end()-1)
-                             new_c = new_c[:ne-1] + " " + provinces + new_c[ne-1:]
+                            npm = re.search(r"owned_provinces\s*=\s*\{", new_c)
+                            ns, ne = self.find_block_content(new_c, npm.end()-1)
+                            new_c = new_c[:ne-1] + " " + provinces + new_c[ne-1:]
                         else:
-                             lb = new_c.rfind('}')
-                             new_c = new_c[:lb] + f"\n\t\towned_provinces = {{ {provinces} }}\n" + new_c[lb:]
+                            lb = new_c.rfind('}')
+                            new_c = new_c[:lb] + f"\n\t\towned_provinces = {{ {provinces} }}\n" + new_c[lb:]
 
                     first = old_range if old_range[0] < new_range[0] else new_range
                     second = new_range if old_range[0] < new_range[0] else old_range
@@ -1567,11 +1579,11 @@ class Vic3Logic:
     def _detect_owners(self, block_content, folder):
         owners = set()
         if folder == "states":
-             matches = re.findall(r"country\s*=\s*c:([A-Za-z0-9_]+)", block_content)
-             owners.update(matches)
+            matches = re.findall(r"country\s*=\s*c:([A-Za-z0-9_]+)", block_content)
+            owners.update(matches)
         else:
-             matches = re.findall(r"region_state:([A-Za-z0-9_]+)", block_content)
-             owners.update(matches)
+            matches = re.findall(r"region_state:([A-Za-z0-9_]+)", block_content)
+            owners.update(matches)
         return list(owners)
 
     def transfer_ownership_batch(self, state_list, old_owners, new_tag):
@@ -1618,8 +1630,8 @@ class Vic3Logic:
                                     current_block, state, owner, new_tag, folder
                                 )
                                 if new_block_content != current_block:
-                                     current_block = new_block_content
-                                     changed_block = True
+                                    current_block = new_block_content
+                                    changed_block = True
 
                             if changed_block:
                                 content = content[:s_start] + current_block + content[s_end:]
@@ -2051,11 +2063,11 @@ class Vic3Logic:
 
         mod_states_dir = os.path.join(self.mod_path, "map_data", "state_regions")
         if not os.path.exists(mod_states_dir):
-             mod_states_dir = os.path.join(self.mod_path, "map", "data", "state_regions")
-             if not os.path.exists(mod_states_dir):
-                 # Default to map_data/state_regions if neither exists
-                 mod_states_dir = os.path.join(self.mod_path, "map_data", "state_regions")
-                 os.makedirs(mod_states_dir, exist_ok=True)
+            mod_states_dir = os.path.join(self.mod_path, "map", "data", "state_regions")
+            if not os.path.exists(mod_states_dir):
+                # Default to map_data/state_regions if neither exists
+                mod_states_dir = os.path.join(self.mod_path, "map_data", "state_regions")
+                os.makedirs(mod_states_dir, exist_ok=True)
 
         if not state_name.startswith("STATE_"):
             state_name = f"STATE_{state_name.upper()}"
@@ -2186,10 +2198,10 @@ class Vic3Logic:
 
         target_states = state_list
         if force_move and region:
-             # Fetch all states in the region to ensure we capture everything
-             target_states = self.get_states_in_region(region)
-             if not target_states:
-                 target_states = state_list # Fallback
+            # Fetch all states in the region to ensure we capture everything
+            target_states = self.get_states_in_region(region)
+            if not target_states:
+                target_states = state_list # Fallback
 
         mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
         files_processed = 0
@@ -2204,7 +2216,7 @@ class Vic3Logic:
 
         # Warning if nothing found
         if files_processed == 0 and self.vanilla_path:
-             self.log(f"[WARN] No military files in mod. {old_tag} armies may be stuck in vanilla. Copy 'common/history/military_formations' from game to mod.", 'warn')
+            self.log(f"[WARN] No military files in mod. {old_tag} armies may be stuck in vanilla. Copy 'common/history/military_formations' from game to mod.", 'warn')
 
     def move_military_from_deleted_state(self, old_state_key, new_state_key):
         # 1. Normalize
@@ -2461,7 +2473,7 @@ class Vic3Logic:
         if not target_file:
             target_file = os.path.join(rep_dir, f"{tag.lower()}_l_english.yml")
             if not os.path.exists(target_file):
-                 with open(target_file, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
+                with open(target_file, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
 
         try:
             with open(target_file, 'r', encoding='utf-8-sig') as f: content = f.read()
@@ -2554,21 +2566,21 @@ class Vic3Logic:
                     new_block = new_block[:new_block.rfind('}')] + f"\n\tcolor = {{ {r} {g} {b} }}\n}}"
                 if capital:
                     if re.search(r"(capital|capital_state)\s*=", new_block):
-                         new_block = re.sub(r"(capital|capital_state)\s*=\s*[A-Za-z0-9_]+", f"capital = {capital}", new_block)
+                        new_block = re.sub(r"(capital|capital_state)\s*=\s*[A-Za-z0-9_]+", f"capital = {capital}", new_block)
                     else:
-                         new_block = new_block[:new_block.rfind('}')] + f"\n\tcapital = {capital}\n}}"
+                        new_block = new_block[:new_block.rfind('}')] + f"\n\tcapital = {capital}\n}}"
                 if cultures:
                     # cultures is a list of strings
                     c_str = " ".join(cultures)
                     if re.search(r"cultures\s*=", new_block):
-                         new_block = re.sub(r"cultures\s*=\s*\{[^}]+\}", f"cultures = {{ {c_str} }}", new_block)
+                        new_block = re.sub(r"cultures\s*=\s*\{[^}]+\}", f"cultures = {{ {c_str} }}", new_block)
                     else:
-                         new_block = new_block[:new_block.rfind('}')] + f"\n\tcultures = {{ {c_str} }}\n}}"
+                        new_block = new_block[:new_block.rfind('}')] + f"\n\tcultures = {{ {c_str} }}\n}}"
                 if religion:
                     if re.search(r"religion\s*=", new_block):
-                         new_block = re.sub(r"religion\s*=\s*[A-Za-z0-9_]+", f"religion = {religion}", new_block)
+                        new_block = re.sub(r"religion\s*=\s*[A-Za-z0-9_]+", f"religion = {religion}", new_block)
                     else:
-                         new_block = new_block[:new_block.rfind('}')] + f"\n\treligion = {religion}\n}}"
+                        new_block = new_block[:new_block.rfind('}')] + f"\n\treligion = {religion}\n}}"
 
                 # Fix Bug: is_named_from_capital should be yes, not a state name
                 if re.search(r"is_named_from_capital\s*=\s*(?!yes\b)[A-Za-z0-9_]+", new_block):
@@ -2804,7 +2816,7 @@ class Vic3Logic:
 
             # Add if missing
             if not re.search(r"activate_law\s*=\s*(law_type:)?" + re.escape(law), new_block):
-                 new_block = new_block[:new_block.rfind('}')] + f"\n\t\tactivate_law = law_type:{law}\n\t}}"
+                new_block = new_block[:new_block.rfind('}')] + f"\n\t\tactivate_law = law_type:{law}\n\t}}"
 
         # Ruler
         char_idx = 0
@@ -2980,7 +2992,7 @@ class Vic3Logic:
                     # Rivals/Embargos (often same structure as pact)
                     # Check filename or explicit types if they are pacts
                     if "rival" in file or "embargo" in file:
-                         for m in re.finditer(r"create_diplomatic_pact\s*=\s*\{([^}]+)\}", block):
+                        for m in re.finditer(r"create_diplomatic_pact\s*=\s*\{([^}]+)\}", block):
                             inner = m.group(1)
                             cty = re.search(r"country\s*=\s*c:([A-Za-z0-9_]+)", inner)
                             typ = re.search(r"type\s*=\s*([A-Za-z0-9_]+)", inner)
@@ -3029,7 +3041,7 @@ class Vic3Logic:
 
         filepath = os.path.join(dip_dir, filename)
         if not os.path.exists(filepath):
-             with open(filepath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
+            with open(filepath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
 
         try:
             with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
@@ -3039,9 +3051,9 @@ class Vic3Logic:
         # Build entry
         entry = ""
         if category == "truce":
-             entry = f"\t\tcreate_bidirectional_truce = {{ country = c:{clean_target} months = 60 }}"
+            entry = f"\t\tcreate_bidirectional_truce = {{ country = c:{clean_target} months = 60 }}"
         else:
-             entry = f"\t\tcreate_diplomatic_pact = {{ country = c:{clean_target} type = {pact_type} }}"
+            entry = f"\t\tcreate_diplomatic_pact = {{ country = c:{clean_target} type = {pact_type} }}"
 
         # Insert
         s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
@@ -3139,7 +3151,7 @@ class Vic3Logic:
         os.makedirs(dip_dir, exist_ok=True)
         fpath = os.path.join(dip_dir, "00_relations.txt")
         if not os.path.exists(fpath):
-             with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
+            with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
 
         try:
             with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
@@ -3163,7 +3175,7 @@ class Vic3Logic:
             new_block = block[:block.rfind('}')] + "\n" + entry + "\n\t}"
             content = content[:s] + new_block + content[e:]
         else:
-             # Create new block
+            # Create new block
             d_s, d_e = self.get_block_range_safe(content, "DIPLOMACY")
             if d_s:
                 new_block = f"\n\tc:{clean_tag} ?= {{\n{entry}\n\t}}"
@@ -3431,7 +3443,7 @@ class Vic3Logic:
     def scan_all_religions_and_heritages(self):
         paths = []
         if self.mod_path:
-             paths.append(os.path.join(self.mod_path, "common", "religions"))
+            paths.append(os.path.join(self.mod_path, "common", "religions"))
 
         religions = set()
         heritages = set()
@@ -3456,11 +3468,11 @@ class Vic3Logic:
                         start = cursor + m.start()
                         s, e = self.find_block_content(content, cursor + m.end()-1)
                         if s:
-                             h = re.search(r"heritage\s*=\s*([a-z0-9_]+)", content[s:e])
-                             if h: heritages.add(h.group(1))
-                             cursor = e
+                            h = re.search(r"heritage\s*=\s*([a-z0-9_]+)", content[s:e])
+                            if h: heritages.add(h.group(1))
+                            cursor = e
                         else:
-                             cursor = start + 1
+                            cursor = start + 1
         return sorted(list(religions)), sorted(list(heritages))
 
     def save_new_culture(self, key, name, color, religion, heritage, language, traditions, graphics, ethnicities, name_data):
@@ -3514,7 +3526,7 @@ class Vic3Logic:
         lpath = os.path.join(loc_dir, f"{mod_name}_cultures_l_english.yml")
 
         if not os.path.exists(lpath):
-             with open(lpath, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
+            with open(lpath, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
 
         with open(lpath, 'a', encoding='utf-8-sig') as f:
             f.write(f' {key}:0 "{name}"\n')
@@ -3554,7 +3566,7 @@ class Vic3Logic:
         lpath = os.path.join(loc_dir, f"{mod_name}_religions_l_english.yml")
 
         if not os.path.exists(lpath):
-             with open(lpath, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
+            with open(lpath, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
 
         with open(lpath, 'a', encoding='utf-8-sig') as f:
             f.write(f' {key}:0 "{name}"\n')
@@ -4817,25 +4829,25 @@ class Vic3Logic:
                         new_inner_parts = []
                         last_p_idx = 0
                         while True:
-                             pm = re.search(r"create_pop\s*=\s*\{", inner[pop_cursor:])
-                             if not pm:
-                                 new_inner_parts.append(inner[last_p_idx:])
-                                 break
+                            pm = re.search(r"create_pop\s*=\s*\{", inner[pop_cursor:])
+                            if not pm:
+                                new_inner_parts.append(inner[last_p_idx:])
+                                break
 
-                             p_start = pop_cursor + pm.start()
-                             new_inner_parts.append(inner[last_p_idx:p_start])
+                            p_start = pop_cursor + pm.start()
+                            new_inner_parts.append(inner[last_p_idx:p_start])
 
-                             p_bs, p_be = self.find_block_content(inner, pop_cursor + pm.end()-1)
-                             if p_bs:
-                                 pop_cursor = p_be
-                                 last_p_idx = p_be
-                             else:
-                                 pop_cursor += 1
+                            p_bs, p_be = self.find_block_content(inner, pop_cursor + pm.end()-1)
+                            if p_bs:
+                                pop_cursor = p_be
+                                last_p_idx = p_be
+                            else:
+                                pop_cursor += 1
 
                         rebuilt_inner = "".join(new_inner_parts)
                         new_state_parts.append("{" + rebuilt_inner + "}")
                     else:
-                         new_state_parts.append(state_block[abs_start:rs_e])
+                        new_state_parts.append(state_block[abs_start:rs_e])
 
                     rs_cursor = rs_e
                     last_idx = rs_e
@@ -5354,31 +5366,31 @@ class Vic3Logic:
 
             # Apply additions
             for state, nc, nr, ns in new_pops_queue:
-                 s_state, e_state = self.get_block_range_safe(content, f"s:{state}")
-                 if s_state is None: continue
+                s_state, e_state = self.get_block_range_safe(content, f"s:{state}")
+                if s_state is None: continue
 
-                 block = content[s_state:e_state]
+                block = content[s_state:e_state]
 
-                 # Find region_state:clean_tag
-                 cursor = 0
-                 found = False
-                 insert_pos = -1
+                # Find region_state:clean_tag
+                cursor = 0
+                found = False
+                insert_pos = -1
 
-                 while True:
-                     m = re.search(r"region_state:([A-Za-z0-9_]+)\s*=\s*\{", block[cursor:])
-                     if not m: break
-                     rt = m.group(1)
-                     rs_s, rs_e = self.find_block_content(block, cursor + m.end() - 1)
-                     if rt.upper() == clean_tag.upper():
-                         insert_pos = s_state + rs_e - 1
-                         found = True
-                         break
-                     cursor = rs_e
+                while True:
+                    m = re.search(r"region_state:([A-Za-z0-9_]+)\s*=\s*\{", block[cursor:])
+                    if not m: break
+                    rt = m.group(1)
+                    rs_s, rs_e = self.find_block_content(block, cursor + m.end() - 1)
+                    if rt.upper() == clean_tag.upper():
+                        insert_pos = s_state + rs_e - 1
+                        found = True
+                        break
+                    cursor = rs_e
 
-                 if found:
-                     rel_str = f" religion = {nr}" if nr else ""
-                     entry = f"\n\t\t\tcreate_pop = {{ culture = {nc}{rel_str} size = {ns} }}"
-                     content = content[:insert_pos] + entry + content[insert_pos:]
+                if found:
+                    rel_str = f" religion = {nr}" if nr else ""
+                    entry = f"\n\t\t\tcreate_pop = {{ culture = {nc}{rel_str} size = {ns} }}"
+                    content = content[:insert_pos] + entry + content[insert_pos:]
 
             with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
             self.log(f"[CONVERT] Processed {os.path.basename(target_path)}", 'success')
@@ -5764,9 +5776,9 @@ class Vic3Logic:
                     new_content = f"namespace = {namespace}\n\n" + event_content
                 else:
                     if f"namespace = {namespace}" not in current_content:
-                         new_content = f"namespace = {namespace}\n" + current_content + "\n" + event_content
+                        new_content = f"namespace = {namespace}\n" + current_content + "\n" + event_content
                     else:
-                         new_content = current_content + "\n" + event_content
+                        new_content = current_content + "\n" + event_content
 
             with open(evt_file, 'w', encoding='utf-8-sig') as f: f.write(new_content)
         except Exception as e:
@@ -6119,9 +6131,9 @@ class Vic3Logic:
                 for file in files:
                     if not file.endswith(".txt"): continue
                     try:
-                         with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+                        with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
                     except:
-                         with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+                        with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
                     matches = re.findall(r'building\s*=\s*"([^"]+)"', content)
                     # Strip building_ prefix
@@ -6131,9 +6143,9 @@ class Vic3Logic:
 
     def _scan_file_for_buildings(self, fpath, clean_state, buildings_list, is_mod):
         try:
-             with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+            with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
         except:
-             with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+            with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
         # Search s:STATE
         cursor = 0
@@ -7166,8 +7178,8 @@ class DemographicsMixer(ttk.Frame):
         self.is_updating = True
 
         if source_idx >= len(self.rows):
-             self.is_updating = False
-             return
+            self.is_updating = False
+            return
 
         # 1. Calculate residual needed for others
         target_val = self.rows[source_idx]["var_pct"].get()
@@ -7992,8 +8004,8 @@ class StateManager:
         """
         Updates ownership in history files for specific provinces (adds or removes).
         added_data can be:
-          - A list of provinces (legacy/single owner mode, adds to ANY existing block or creates new default)
-          - A dict { owner_tag: [provinces] } for split ownership.
+            - A list of provinces (legacy/single owner mode, adds to ANY existing block or creates new default)
+            - A dict { owner_tag: [provinces] } for split ownership.
         """
         if not added_data and not removed_list: return
 
@@ -8402,7 +8414,7 @@ class StateManager:
                                 wrapper = "POPS" if folder == "pops" else "BUILDINGS"
                                 new_file_content = f"{wrapper} = {{\n\ts:{new_state_id} = {{\n\t}}\n}}"
                                 if os.path.exists(new_file_path):
-                                     with open(new_file_path, 'r', encoding='utf-8-sig') as f: new_file_content = f.read()
+                                    with open(new_file_path, 'r', encoding='utf-8-sig') as f: new_file_content = f.read()
 
                             ns, ne = self.logic.get_block_range_safe(new_file_content, f"s:{new_state_id}")
                             if ns is not None:
@@ -8691,7 +8703,7 @@ class App(tk.Tk):
         self.mm_loc = tk.StringVar()
         # Default to standard paradox mod path if possible or current mod's parent
         if self.path_var.get():
-             self.mm_loc.set(os.path.dirname(self.path_var.get()))
+            self.mm_loc.set(os.path.dirname(self.path_var.get()))
 
         ttk.Entry(new_frame, textvariable=self.mm_loc, width=30).pack(side=tk.LEFT, padx=5)
         ttk.Button(new_frame, text="Browse...", command=self.browse_mod_parent).pack(side=tk.LEFT, padx=5)
@@ -8737,8 +8749,8 @@ class App(tk.Tk):
 
             # Ask if user wants to copy vanilla files now
             if messagebox.askyesno("Setup", "Copy vanilla files to new mod now?"):
-                 v_path = self.ensure_vanilla_path()
-                 if v_path:
+                v_path = self.ensure_vanilla_path()
+                if v_path:
                     self.log_message("Starting file copy...", 'info')
                     threading.Thread(target=self.logic.copy_vanilla_files, args=(v_path, mod_path), daemon=True).start()
 
@@ -8747,8 +8759,8 @@ class App(tk.Tk):
     def start_copy_vanilla(self):
         mod_path = self.path_var.get()
         if not mod_path:
-             messagebox.showerror("Error", "Mod path not selected.")
-             return
+            messagebox.showerror("Error", "Mod path not selected.")
+            return
 
         v_path = self.ensure_vanilla_path()
         if not v_path: return
@@ -8761,8 +8773,8 @@ class App(tk.Tk):
     def start_backup(self):
         mod_path = self.path_var.get()
         if not mod_path:
-             messagebox.showerror("Error", "Mod path not selected.")
-             return
+            messagebox.showerror("Error", "Mod path not selected.")
+            return
         self.logic.backup_mod(mod_path)
 
     def toggle_auto_backup(self):
@@ -9160,16 +9172,16 @@ class App(tk.Tk):
             u2 = int(self.mil_u2.get())
             u3 = int(self.mil_u3.get())
         except:
-             return messagebox.showerror("Error", "Unit counts must be integers.")
+            return messagebox.showerror("Error", "Unit counts must be integers.")
 
         self.is_processing = True
         self.run_btn.config(state='disabled')
         self.log_area.config(state='normal'); self.log_area.delete('1.0', tk.END); self.log_area.config(state='disabled')
 
         if m_type == "army":
-             threading.Thread(target=self.run_army_logic, args=(tag, name, state, u1, u2, u3), daemon=True).start()
+            threading.Thread(target=self.run_army_logic, args=(tag, name, state, u1, u2, u3), daemon=True).start()
         else:
-             threading.Thread(target=self.run_navy_logic, args=(tag, name, state, u1, u2, u3), daemon=True).start()
+            threading.Thread(target=self.run_navy_logic, args=(tag, name, state, u1, u2, u3), daemon=True).start()
     def load_military_formations(self):
         tag = self.logic.format_tag_clean(self.mil_tag.get())
         if not tag: return messagebox.showerror("Error", "Tag required.")
@@ -10131,14 +10143,14 @@ class App(tk.Tk):
                 break
 
         if req_principles and not has_req:
-             # Create nice string for warning
-             req_names = [p.replace("principle_", "").replace("_", " ").title() for p in req_principles]
-             msg = f"The identity '{identity}' requires at least one of these principles:\n" + "\n".join(req_names)
-             messagebox.showwarning("Validation Error", msg)
-             return
+            # Create nice string for warning
+            req_names = [p.replace("principle_", "").replace("_", " ").title() for p in req_principles]
+            msg = f"The identity '{identity}' requires at least one of these principles:\n" + "\n".join(req_names)
+            messagebox.showwarning("Validation Error", msg)
+            return
 
         if not hasattr(self, 'pb_current_members'):
-             self.pb_current_members = []
+            self.pb_current_members = []
 
         data = {
             "key": key,
@@ -10188,19 +10200,19 @@ class App(tk.Tk):
 
         # Culture/Religion Creator Dropdowns
         if hasattr(self, 'rc_c_rel'):
-             # Update scanning for just keys if needed, but r_keys var was local.
-             # scan_all_religions returns keys, heritages
-             keys, _ = self.logic.scan_all_religions_and_heritages()
-             self.rc_c_rel['values'] = keys
+            # Update scanning for just keys if needed, but r_keys var was local.
+            # scan_all_religions returns keys, heritages
+            keys, _ = self.logic.scan_all_religions_and_heritages()
+            self.rc_c_rel['values'] = keys
 
         # Create Country Dropdowns if needed
         if hasattr(self, 'cb_cultures'):
-             # Create country uses scan_definitions_for_options mostly, but could benefit from new ones
-             # Re-run scan_definitions_for_options
-             all_c, _, _, _ = self.logic.scan_definitions_for_options()
-             # We should probably merge scanned cultures from definitions AND files if creating new ones
-             # For now, let's just stick to the requested scope
-             pass
+            # Create country uses scan_definitions_for_options mostly, but could benefit from new ones
+            # Re-run scan_definitions_for_options
+            all_c, _, _, _ = self.logic.scan_definitions_for_options()
+            # We should probably merge scanned cultures from definitions AND files if creating new ones
+            # For now, let's just stick to the requested scope
+            pass
 
         if hasattr(self, 'cb_mc_cul_add'): self.cb_mc_cul_add['values'] = all_culs
 
@@ -10351,8 +10363,8 @@ class App(tk.Tk):
                 self.logic.perform_transfer_sequence(states_clean, new_tag, known_old_owners=[old_tag])
 
                 if set_current and set_current.issubset(set_transfer):
-                     self.log_message(f"[INFO] Full annexation detected for {old_tag} via Split Transfer.", 'info')
-                     self.logic.perform_annexation_cleanup(old_tag, new_tag, states_clean)
+                    self.log_message(f"[INFO] Full annexation detected for {old_tag} via Split Transfer.", 'info')
+                    self.logic.perform_annexation_cleanup(old_tag, new_tag, states_clean)
 
             else: # auto
                 self.log_message(f"--- Processing Auto-Transfer -> {new_tag} ---", 'info')
@@ -10376,13 +10388,13 @@ class App(tk.Tk):
                     set_transfer = set(s.upper() for s in states_clean)
 
                     if set_current and set_current.issubset(set_transfer):
-                         annex_list.append(owner)
+                        annex_list.append(owner)
 
                 self.logic.perform_transfer_sequence(states_clean, new_tag, known_old_owners=None)
 
                 for owner in annex_list:
-                     self.log_message(f"[INFO] Full annexation detected for {owner} via Auto Transfer.", 'info')
-                     self.logic.perform_annexation_cleanup(owner, new_tag, states_clean)
+                    self.log_message(f"[INFO] Full annexation detected for {owner} via Auto Transfer.", 'info')
+                    self.logic.perform_annexation_cleanup(owner, new_tag, states_clean)
 
         except Exception as e:
             self.log_message(f"CRITICAL ERROR: {str(e)}", 'error')
@@ -10433,8 +10445,8 @@ class App(tk.Tk):
                 set_transfer = set(s.upper() for s in all_states)
                 
                 if set_current and set_current.issubset(set_transfer):
-                     self.log_message(f"[INFO] Full annexation detected (implicit).", 'info')
-                     should_cleanup = True
+                    self.log_message(f"[INFO] Full annexation detected (implicit).", 'info')
+                    should_cleanup = True
 
             self.logic.create_country_files(tag, name, adj, capital, rgb, cultures, religion, tier, country_type, old_owner, pop_wealth, pop_lit)
             
@@ -10634,12 +10646,12 @@ class App(tk.Tk):
         name_src = self.rc_c_namesrc.get()
         name_data = {}
         if name_src and name_src in self.cult_scan_data:
-             name_data = self.cult_scan_data[name_src]
+            name_data = self.cult_scan_data[name_src]
 
         self.logic.save_new_culture(
-             key, name, self.rc_c_rgb,
-             self.rc_c_rel.get(), raw_her, raw_lang,
-             trads, self.rc_c_graph.get(), eths, name_data
+            key, name, self.rc_c_rgb,
+            self.rc_c_rel.get(), raw_her, raw_lang,
+            trads, self.rc_c_graph.get(), eths, name_data
         )
         self.refresh_all_dropdowns()
         messagebox.showinfo("Success", f"Culture {key} saved.")
@@ -10652,7 +10664,7 @@ class App(tk.Tk):
         if not self.rc_r_her.get(): return messagebox.showerror("Error", "Heritage required.")
 
         self.logic.save_new_religion(
-             key, name, self.rc_r_rgb, self.rc_r_her.get(), self.rc_r_icon.get()
+            key, name, self.rc_r_rgb, self.rc_r_her.get(), self.rc_r_icon.get()
         )
         self.refresh_all_dropdowns()
         messagebox.showinfo("Success", f"Religion {key} saved.")
@@ -11002,8 +11014,8 @@ class App(tk.Tk):
                     elif t == "Add Radicals": formatted = f"add_radicals = {{ value = {v1} }}"
                     elif t == "Trigger Event": formatted = f"trigger_event = {v1}"
                     elif t == "Interest Group Approval":
-                         if v1 and v2:
-                             opt_data["ig_effects"].append({"ig": v1, "value": v2})
+                        if v1 and v2:
+                            opt_data["ig_effects"].append({"ig": v1, "value": v2})
 
                     if formatted:
                         opt_data["general_effects"].append(formatted)
@@ -11550,7 +11562,7 @@ class App(tk.Tk):
         # Update Mixer Owner Dropdown
         self.cb_mix_owner['values'] = land_owners
         if land_owners:
-             self.cb_mix_owner.current(0)
+            self.cb_mix_owner.current(0)
 
         # Pops
         pops = self.logic.get_state_pops(state)
@@ -12024,16 +12036,16 @@ class App(tk.Tk):
 
         Workflows:
         1. Modifying Existing States:
-           - Open Map Editor.
-           - Right-click a state to set it as Target.
-           - Left-click provinces to 'steal' them for the target.
-           - Click 'Transfer Selected to Target'.
+            - Open Map Editor.
+            - Right-click a state to set it as Target.
+            - Left-click provinces to 'steal' them for the target.
+            - Click 'Transfer Selected to Target'.
 
         2. Creating New States:
-           - Open Map Editor.
-           - Left-click provinces to select them.
-           - Click 'Create State from Selected'.
-           - Enter Name and Owner Tag.
+            - Open Map Editor.
+            - Left-click provinces to select them.
+            - Click 'Create State from Selected'.
+            - Enter Name and Owner Tag.
         """
         ttk.Label(f, text=info, justify=tk.LEFT).pack(pady=10)
 
@@ -12105,10 +12117,10 @@ class Vic3ProvincePainter(tk.Toplevel):
         win.geometry(f"+{x}+{y}")
 
         tk.Label(win, text=f"Multiple owners detected for selected provinces:\n{', '.join(owners)}",
-                 wraplength=380, justify=tk.CENTER, bg="#212121", fg="white").pack(pady=10)
+                wraplength=380, justify=tk.CENTER, bg="#212121", fg="white").pack(pady=10)
 
         tk.Label(win, text="How do you wish to proceed?", font=("Segoe UI", 10, "bold"),
-                 bg="#212121", fg="white").pack(pady=5)
+                bg="#212121", fg="white").pack(pady=5)
 
         # Split
         def on_split():
@@ -12119,22 +12131,22 @@ class Vic3ProvincePainter(tk.Toplevel):
         btn_fg = "white"
 
         tk.Button(win, text="Maintain Split State\n(Each tag keeps its provinces)", command=on_split,
-                  bg=btn_bg, fg=btn_fg, relief="raised", bd=1).pack(fill=tk.X, padx=20, pady=5)
+                bg=btn_bg, fg=btn_fg, relief="raised", bd=1).pack(fill=tk.X, padx=20, pady=5)
 
         # Single
         f_single = tk.Frame(win, bg="#212121")
         f_single.pack(fill=tk.X, padx=20, pady=5)
 
         tk.Button(f_single, text="Transfer All To:", command=lambda: on_single(),
-                  bg=btn_bg, fg=btn_fg, relief="raised", bd=1).pack(side=tk.LEFT)
+                bg=btn_bg, fg=btn_fg, relief="raised", bd=1).pack(side=tk.LEFT)
 
         cb_tag = ttk.Combobox(f_single, values=sorted(list(options)), width=10)
         cb_tag.pack(side=tk.LEFT, padx=5)
 
         if default_tag and default_tag in options:
-             cb_tag.set(default_tag)
+            cb_tag.set(default_tag)
         elif options:
-             cb_tag.current(0)
+            cb_tag.current(0)
 
         def on_single():
             t = cb_tag.get().strip()
@@ -12323,7 +12335,7 @@ class Vic3ProvincePainter(tk.Toplevel):
         # If no explicit hexes, it implies "all remaining".
 
         for p in reversed(paths): # Reverse so mod comes last in loop? No, paths has mod first.
-             pass
+            pass
         # Actually loop order: Vanilla then Mod is better for overwrite logic if using dicts.
         # paths = [mod, vanilla] -> reverse to [vanilla, mod]
 
@@ -12412,7 +12424,7 @@ class Vic3ProvincePainter(tk.Toplevel):
 
         # Limit minimum size
         if new_w < 100 or new_h < 100:
-             new_w, new_h = 100, 100
+            new_w, new_h = 100, 100
 
         img_small = img.resize((new_w, new_h), resample=Image.Resampling.NEAREST)
 
@@ -12962,11 +12974,11 @@ class Vic3ProvincePainter(tk.Toplevel):
                 if curr:
                     owner_data[curr].append(p)
                 else:
-                     # Unowned? Assign to first or ignore?
-                     # Let's assign to first found owner to avoid data loss
-                     if found_owners:
-                         first = list(found_owners)[0]
-                         owner_data[first].append(p)
+                    # Unowned? Assign to first or ignore?
+                    # Let's assign to first found owner to avoid data loss
+                    if found_owners:
+                        first = list(found_owners)[0]
+                        owner_data[first].append(p)
 
             self.logic.state_manager.create_new_state(name, owner_data, list(self.selected_provinces))
 
