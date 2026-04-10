@@ -6521,7 +6521,8 @@ class Vic3Logic:
 			target_path = os.path.join(self.mod_path, "common/history/buildings/99_mod_buildings.txt")
 			os.makedirs(os.path.dirname(target_path), exist_ok=True)
 			if not os.path.exists(target_path):
-				with open(target_path, 'w', encoding='utf-8-sig') as f: f.write("BUILDINGS = {\n}")
+				with open(target_path, 'w', encoding='utf-8-sig') as f:
+					f.write("BUILDINGS = {\n}")
 			target_content = "BUILDINGS = {\n}"
 
 		# Re-read
@@ -6533,7 +6534,7 @@ class Vic3Logic:
 		# Construct Building Block
 		ownership_block = self.get_ownership_block(building_type, clean_building_owner, level, clean_state)
 
-		self.log("NEW B BLOCK RUNNING")
+		self.log("[DEBUG] new_b_block")
 		new_b_block  =  "\n\t\t\tcreate_building = {"
 		new_b_block += f"\n\t\t\t\tbuilding = \"{building_type}\""
 		new_b_block += f"{ownership_block}"
