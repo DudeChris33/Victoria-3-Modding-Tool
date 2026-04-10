@@ -827,16 +827,17 @@ class Vic3Logic:
 		mil_file = os.path.join(mil_dir, f"99_auto_army_{tag.lower()}_{safe_name}.txt")
 
 		# Wrapper MILITARY_FORMATIONS added with ?=
-		content =  f"MILITARY_FORMATIONS = {{"
+		content  =  "MILITARY_FORMATIONS = {"
 		content += f"\n\tc:{tag} ?= {{"
-		content += f"\n\t\tcreate_military_formation = {{"
+		content +=  "\n\t\tcreate_military_formation = {"
 		content += f"\n\t\t\tname = \"{army_name}\""
-		content += f"\n\t\t\ttype = army"
+		content +=  "\n\t\t\ttype = army"
 		content += f"\n\t\t\thq_region = {hq_region}"
-		content += f"\n{units_block}"
-		content += f"\n\t\t}}"
-		content += f"\n\t}}"
-		content += f"\n}}"
+		content +=  "\n"
+		content += f"{units_block}"
+		content +=  "\n\t\t}"
+		content +=  "\n\t}"
+		content +=  "\n}"
 		with open(mil_file, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"   [WRITE] {mil_file}", 'success')
@@ -877,17 +878,19 @@ class Vic3Logic:
 		mil_file = os.path.join(mil_dir, f"99_auto_navy_{tag.lower()}_{safe_name}.txt")
 
 		# Wrapper MILITARY_FORMATIONS added with ?=
-		content =  f"MILITARY_FORMATIONS = {{"
+		content =   "MILITARY_FORMATIONS = {"
 		content += f"\n\tc:{tag} ?= {{"
-		content += f"\n\t\tcreate_military_formation = {{"
+		content +=  "\n\t\tcreate_military_formation = {"
 		content += f"\n\t\t\tname = \"{navy_name}\""
-		content += f"\n\t\t\ttype = fleet"
+		content +=  "\n\t\t\ttype = fleet"
 		content += f"\n\t\t\thq_region = {hq_region}"
-		content += f"\n{units_block}"
-		content += f"\n\t\t}}"
-		content += f"\n\t}}"
-		content += f"\n}}"
-		with open(mil_file, 'w', encoding='utf-8-sig') as f: f.write(content)
+		content +=  "\n"
+		content += f"{units_block}"
+		content +=  "\n\t\t}"
+		content +=  "\n\t}"
+		content +=  "\n}"
+		with open(mil_file, 'w', encoding='utf-8-sig') as f:
+			f.write(content)
 		self.log(f"   [WRITE] {mil_file}", 'success')
 
 	# --- EXISTING TRANSFER LOGIC ---
@@ -1226,35 +1229,37 @@ class Vic3Logic:
 		# Ensure prefix
 		if not building_type.startswith("building_"):
 			building_type = f"building_{building_type}"
-			
+		
 		clean_owner = owner_tag.replace("c:", "").strip()
 		# Ensure state name is just the name, no s: prefix
 		clean_state = state_name.replace("s:", "").strip()
 		economic_law = self.get_country_economic_law(clean_owner)
 
-		building_text = ""
 		if building_type in self.CAT_A_STATE or economic_law == "law_command_economy":
-			building_text += f'\n\t\t\t\t\tcountry = {{'
+			building_text  = f'\n\t\t\t\t\tcountry = {{'
 			building_text += f'\n\t\t\t\t\t\tcountry = "c:{clean_owner}"'
 			building_text += f'\n\t\t\t\t\t\tlevels = {level}'
 			building_text += f'\n\t\t\t\t\t}}'
-			return building_text
-		elif economic_law in {"law_traditionalism", "law_agrarianism"} or building_type in self.CAT_B_RURAL:
-			building_text += f'\n\t\t\t\t\tbuilding = {{'
+		elif building_type in self.CAT_B_RURAL or economic_law in {"law_traditionalism", "law_agrarianism"}:
+			building_text  = f'\n\t\t\t\t\tbuilding = {{'
 			building_text += f'\n\t\t\t\t\t\ttype = "building_manor_house"'
 			building_text += f'\n\t\t\t\t\t\tcountry = "c:{clean_owner}"'
 			building_text += f'\n\t\t\t\t\t\tlevels = {level}'
 			building_text += f'\n\t\t\t\t\t\tregion = "{clean_state}"'
 			building_text += f'\n\t\t\t\t\t}}'
-			return building_text
-		else:
-			building_text += f'\n\t\t\t\t\tbuilding = {{'
+		elif economic_law in {"law_interventionism", "law_laissez_faire"}:
+			building_text  = f'\n\t\t\t\t\tbuilding = {{'
 			building_text += f'\n\t\t\t\t\t\ttype = "building_financial_district"'
 			building_text += f'\n\t\t\t\t\t\tcountry = "c:{clean_owner}"'
 			building_text += f'\n\t\t\t\t\t\tlevels = {level}'
 			building_text += f'\n\t\t\t\t\t\tregion = "{clean_state}"'
 			building_text += f'\n\t\t\t\t\t}}'
-			return building_text
+		else:
+			building_text  = f'\n\t\t\t\t\tcountry = {{'
+			building_text += f'\n\t\t\t\t\t\tcountry = "c:{clean_owner}"'
+			building_text += f'\n\t\t\t\t\t\tlevels = {level}'
+			building_text += f'\n\t\t\t\t\t}}'
+		return building_text
 
 	def get_country_economic_law(self, tag):
 		"""Returns the country's active economic law, if found."""
@@ -1272,7 +1277,7 @@ class Vic3Logic:
 
 	def get_ownership_block(self, building_type, owner_tag, level, state_name):
 		inner = self.get_ownership_content(building_type, owner_tag, level, state_name)
-		outer_text =  f"\n\t\t\t\tadd_ownership = {{"
+		outer_text  = f"\n\t\t\t\tadd_ownership = {{"
 		outer_text += f"{inner}"
 		outer_text += f"\n\t\t\t\t}}"
 		return outer_text
@@ -1800,7 +1805,8 @@ class Vic3Logic:
 					# Extract formation name for logging
 					form_name = "Unknown"
 					fn_m = re.search(r"name\s*=\s*\"?([^\s\"]+)\"?", formation_full)
-					if fn_m: form_name = fn_m.group(1)
+					if fn_m:
+						form_name = fn_m.group(1)
 
 					# Detect if this formation belongs to the region being processed/abandoned
 					formation_in_scope = False
@@ -1915,7 +1921,8 @@ class Vic3Logic:
 			processed_file_parts.append(header + "".join(new_inner_parts) + footer)
 			last_idx = c_end
 			current_search_idx = c_end 
-		if not files_modified: return False
+		if not files_modified:
+			return False
 		new_file_content = "".join(processed_file_parts)
 
 		# Detect original wrapper existence using loose search to catch "MILITARY_FORMATIONS={"
@@ -1927,10 +1934,13 @@ class Vic3Logic:
 		if has_wrapper_orig and not has_wrapper_new:
 			self.log("[FIX] Restoring missing MILITARY_FORMATIONS wrapper.")
 			# Wrap the whole content
-			new_file_content = f"MILITARY_FORMATIONS = {{\n{new_file_content}\n}}"
+			new_file_content  =  "MILITARY_FORMATIONS = {"
+			new_file_content += f"{new_file_content}"	# todo
+			new_file_content +=  "\n}"
 
 		def inject_new_formation(file_content, unit_buffer, f_type):
-			if not unit_buffer: return file_content
+			if not unit_buffer:
+				return file_content
 			# Use dest_hq_region if provided, else use original region (which may be invalid if country left it)
 			# If dest_hq_region is None (explicitly passed as None), it means "Delete/Disband"
 
@@ -1948,42 +1958,52 @@ class Vic3Logic:
 				hq_region_val = f"sr:{clean_region_str}"
 			else:
 				hq_region_val = clean_region_str
+
 			immersive_name = self.generate_immersive_name(clean_region_str, f_type)	# todo
-			formatted_units = "\n\t\t".join(unit_buffer)
-			block_str =  f"\t\tcreate_military_formation = {{\n"
-			block_str += f"\t\t\tname = {immersive_name}\n"
-			block_str += f"\t\t\ttype = {f_type}\n"
-			block_str += f"\t\t\thq_region = {hq_region_val}\n"
-			block_str += f"\t\t\t# Transferred Units\n"
-			block_str += f"{formatted_units}\n"
-			block_str += f"\t\t}}\n"
+			formatted_units = "\n\t\t\t".join(unit_buffer)	# todo
+
+			block_str =   "\n\t\tcreate_military_formation = {"
+			block_str += f"\n\t\t\tname = {immersive_name}"
+			block_str += f"\n\t\t\ttype = {f_type}"
+			block_str += f"\n\t\t\thq_region = {hq_region_val}"
+			block_str +=  "\n\t\t\t# Transferred Units"
+			block_str +=  "\n"
+			block_str += f"{formatted_units}"
+			block_str +=  "\n\t\t}"
+
 			last_tag_pos = -1
 			curr = 0
+
 			while True:
 				ns, ne = self.get_block_range_safe(file_content, f"c:{new_tag}", curr)
-				if ns is None: break
+				if ns is None:
+					break
 				last_tag_pos = ns
 				curr = ne
 			if last_tag_pos != -1:
 				_, end_brace = self.find_block_content(file_content, last_tag_pos)
 				insert_pos = end_brace - 1
-				return file_content[:insert_pos] + "\n" + block_str + "\n" + file_content[insert_pos:]
+				return file_content[:insert_pos] + block_str + file_content[insert_pos:]
 			else:
 				# NEW LOGIC: Check for MILITARY_FORMATIONS wrapper to insert inside it
 				mf_start, mf_end = self.get_block_range_safe(file_content, "MILITARY_FORMATIONS")
+				return_str  = f"\n\tc:{new_tag} ?= {{"
+				return_str += f"{block_str}"
+				return_str += f"\n\t}}"
 				if mf_start is not None:
 					# Insert before the last brace of the wrapper
 					insert_pos = mf_end - 1
-					return file_content[:insert_pos] + f"\n\tc:{new_tag} ?= {{\n{block_str}\n\t}}\n" + file_content[insert_pos:]
+					return file_content[:insert_pos] + return_str + file_content[insert_pos:]
 				else:
-					return file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"
+					return file_content + return_str
 		if stolen_units_army:
 			self.log(f"	  [CREATE] Creating Army for {new_tag}")
 			new_file_content = inject_new_formation(new_file_content, stolen_units_army, "army")
 		if stolen_units_fleet:
 			self.log(f"	  [CREATE] Creating Fleet for {new_tag}")
 			new_file_content = inject_new_formation(new_file_content, stolen_units_fleet, "fleet")
-		with open(filepath, 'w', encoding='utf-8-sig') as f: f.write(new_file_content)
+		with open(filepath, 'w', encoding='utf-8-sig') as f:
+			f.write(new_file_content)
 		return True
 
 	def scan_state_resources(self, state_name):
@@ -2010,10 +2030,12 @@ class Vic3Logic:
 
 		found_content = None
 		for p in paths:
-			if not os.path.exists(p): continue
+			if not os.path.exists(p):
+				continue
 			for root, _, files in os.walk(p):
 				for file in files:
-					if not file.endswith(".txt"): continue
+					if not file.endswith(".txt"):
+						continue
 					try:
 						with open(os.path.join(root, file), 'r', encoding='utf-8-sig', errors='ignore') as f:
 							content = f.read()
@@ -2022,9 +2044,12 @@ class Vic3Logic:
 						if re.search(r"(^|\s)" + re.escape(state_name) + r"\s*=\s*\{", content):
 							found_content = content
 							break
-					except: pass
-				if found_content: break
-			if found_content: break
+					except:
+						pass
+				if found_content:
+					break
+			if found_content:
+				break
 
 		if found_content:
 			# Extract block
@@ -2126,13 +2151,16 @@ class Vic3Logic:
 				os.path.join(self.vanilla_path, "game", "map", "data", "state_regions")
 			]
 			for v_dir in v_dirs:
-				if not os.path.exists(v_dir): continue
+				if not os.path.exists(v_dir):
+					continue
 				for root, _, files in os.walk(v_dir):
 					for file in files:
-						if not file.endswith(".txt"): continue
+						if not file.endswith(".txt"):
+							continue
 						path = os.path.join(root, file)
 						try:
-							with open(path, 'r', encoding='utf-8-sig', errors='ignore') as f: c = f.read()
+							with open(path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+								c = f.read()
 							if re.search(r"(^|\s)" + re.escape(state_name) + r"\s*=\s*\{", c):
 								# Found it. Copy to mod.
 								target_file = os.path.join(mod_states_dir, file)
@@ -2141,9 +2169,12 @@ class Vic3Logic:
 									f_out.write(c)
 								self.log(f"[RES] Copied {file} from vanilla to mod.", 'info')
 								break
-						except: pass
-					if target_file: break
-				if target_file: break
+						except:
+							pass
+					if target_file:
+						break
+				if target_file:
+					break
 
 		if not target_file:
 			self.log(f"[ERROR] Could not find state definition for {state_name}", 'error')
@@ -2152,7 +2183,8 @@ class Vic3Logic:
 		# 2. Modify Content
 		# We need to replace/update blocks inside STATE_NAME = { ... }
 		s, e = self.get_block_range_safe(target_content, state_name)
-		if s is None: return
+		if s is None:
+			return
 
 		block = target_content[s:e]
 
@@ -2204,11 +2236,13 @@ class Vic3Logic:
 		# We'll use a loop to strip them out
 		while True:
 			rm = re.search(r"resource\s*=\s*\{", block)
-			if not rm: break
+			if not rm:
+				break
 			rs, re_idx = self.find_block_content(block, rm.end()-1)
 			if rs:
 				block = block[:rm.start()] + block[re_idx:]
-			else: break # Should not happen
+			else:
+				break # Should not happen
 
 		# Now append new ones
 		res_strings = []
@@ -2221,7 +2255,8 @@ class Vic3Logic:
 
 		# Write back
 		final_content = target_content[:s] + block + target_content[e:]
-		with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(final_content)
+		with open(target_file, 'w', encoding='utf-8-sig') as f:
+			f.write(final_content)
 		self.log(f"[RES] Updated resources for {state_name}", 'success')
 
 	def clean_military_smart(self, old_tag, new_tag, region, state_list, force_move=False, dest_hq_region=None, dest_home_state=None):
@@ -2239,9 +2274,11 @@ class Vic3Logic:
 		files_processed = 0
 		if os.path.exists(mil_dir):
 			for root, _, files in os.walk(mil_dir):
-				if self.stop_event.is_set(): return
+				if self.stop_event.is_set():
+					return
 				for file in files:
-					if not file.endswith(".txt"): continue
+					if not file.endswith(".txt"):
+						continue
 					filepath = os.path.join(root, file)
 					files_processed += 1
 					self.process_military_extraction_multi_pass(filepath, old_tag, new_tag, region, target_states, force_move=force_move, dest_hq_region=dest_hq_region, dest_home_state=dest_home_state)
@@ -4395,7 +4432,8 @@ class Vic3Logic:
 						cursor += 1
 
 				if file_modified:
-					with open(filepath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_file_parts))
+					with open(filepath, 'w', encoding='utf-8-sig') as f:
+						f.write("".join(new_file_parts))
 					self.log(f"   [CLEANUP] Repatriated invalid ownerships in {file}")
 
 	def sanitize_buildings(self, old_tag, target_tag, transferred_states):
@@ -4403,7 +4441,8 @@ class Vic3Logic:
 		self.log(f"[ANNEX] Sanitizing buildings: {old_tag} -> {target_tag}")
 		
 		buildings_dir = os.path.join(self.mod_path, "common/history/buildings")
-		if not os.path.exists(buildings_dir): return
+		if not os.path.exists(buildings_dir):
+			return
 
 		clean_old = old_tag.replace("c:", "").strip()
 		clean_target = target_tag.replace("c:", "").strip()
@@ -4414,9 +4453,11 @@ class Vic3Logic:
 				filepath = os.path.join(root, file)
 				
 				try:
-					with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with open(filepath, 'r', encoding='utf-8-sig') as f:
+						content = f.read()
 				except:
-					with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+					with open(filepath, 'r', encoding='utf-8') as f:
+						content = f.read()
 				
 				new_content = content
 				file_changed = False
@@ -4425,7 +4466,8 @@ class Vic3Logic:
 				cursor = 0
 				while True:
 					m_state = re.search(r"s:(STATE_[A-Za-z0-9_]+)\s*=\s*\{", new_content[cursor:])
-					if not m_state: break
+					if not m_state:
+						break
 					
 					state_name = m_state.group(1)
 					state_abs_start = cursor + m_state.start()
@@ -4453,7 +4495,8 @@ class Vic3Logic:
 						temp_cursor = 0
 						while True:
 							m_rs = re.search(r"region_state:\s*(?:c:)?([A-Za-z0-9_]+)\s*=\s*\{", state_body_new[temp_cursor:], re.IGNORECASE)
-							if not m_rs: break
+							if not m_rs:
+								break
 
 							rs_owner_raw = m_rs.group(1)
 							rs_owner = self.format_tag_clean(rs_owner_raw)
@@ -6490,11 +6533,13 @@ class Vic3Logic:
 		# Construct Building Block
 		ownership_block = self.get_ownership_block(building_type, clean_building_owner, level, clean_state)
 
-		new_b_block =  f"\n\t\t\tcreate_building = {{\n"
-		new_b_block += f"\t\t\t\tbuilding = \"{building_type}\"\n"
-		new_b_block += f"\t\t\t\treserves = 1\n"
-		new_b_block += f"\t\t\t\tactivate_production_methods = {{ }}{ownership_block}\n"
-		new_b_block += f"\t\t\t}}"
+		self.log("NEW B BLOCK RUNNING")
+		new_b_block  =  "\n\t\t\tcreate_building = {"
+		new_b_block += f"\n\t\t\t\tbuilding = \"{building_type}\""
+		new_b_block += f"{ownership_block}"
+		new_b_block +=  "\n\t\t\t\treserves = 1\n"
+		new_b_block += f"\n\t\t\t\tactivate_production_methods = {{ }}"	# todo
+		new_b_block +=  "\n\t\t\t}"
 
 		s, e = self.get_block_range_safe(target_content, f"s:{clean_state}")
 
@@ -6523,20 +6568,27 @@ class Vic3Logic:
 				new_state_block = state_block[:rs_insert_idx] + new_b_block + state_block[rs_insert_idx:]
 				target_content = target_content[:s] + new_state_block + target_content[e:]
 			else:
-				new_rs =  f"\n\t\tregion_state:{clean_land_owner}={{\n"
-				new_rs += f"{new_b_block}\n"
-				new_rs += f"\t\t}}"
+				new_rs  = f"\n\t\tregion_state:{clean_land_owner} = {{"
+				new_rs += f"{new_b_block}"
+				new_rs += f"\n\t\t}}"
 				new_state_block = state_block[:state_block.rfind('}')] + new_rs + "\n\t}"
 				target_content = target_content[:s] + new_state_block + target_content[e:]
 		else:
-			new_entry = f"\n\ts:{clean_state}={{\n\t\tregion_state:{clean_land_owner}={{\n{new_b_block}\n\t\t}}\n\t}}"
+			new_entry  = f"\n\ts:{clean_state} = {{"
+			new_entry += f"\n\t\tregion_state:{clean_land_owner} = {{"
+			new_entry += f"{new_b_block}"
+			new_entry += f"\n\t\t}}"
+			new_entry += f"\n\t}}"
 			bs, be = self.get_block_range_safe(target_content, "BUILDINGS")
 			if bs is not None:
 				target_content = target_content[:be-1] + new_entry + "\n}" + target_content[be:]
 			else:
-				target_content += f"\nBUILDINGS = {{{new_entry}\n}}"
+				target_content += f"BUILDINGS = {{"
+				target_content += f"{new_entry}"
+				target_content += f"\n}}"
 
-		with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(target_content)
+		with open(target_path, 'w', encoding='utf-8-sig') as f:
+			f.write(target_content)
 		self.log(f"[BUILDING] Added {building_type} to {clean_state} (Land: {clean_land_owner}, Owner: {clean_building_owner})", 'success')
 
 	def cleanup_power_bloc_membership(self, tag):
@@ -7017,21 +7069,30 @@ class Vic3Logic:
 				
 				# Map back to game keys
 				real_type = ""
-				if u_type == "infantry": real_type = "unit_type:combat_unit_type_line_infantry"
-				elif u_type == "artillery": real_type = "unit_type:combat_unit_type_cannon_artillery"
-				elif u_type == "cavalry": real_type = "unit_type:combat_unit_type_hussars"
-				elif u_type == "manowar": real_type = "unit_type:combat_unit_type_man_o_war"
-				elif u_type == "frigate": real_type = "unit_type:combat_unit_type_frigate"
-				elif u_type == "ironclad": real_type = "unit_type:combat_unit_type_ironclad"
-				else: real_type = f"unit_type:{u_type}" if not u_type.startswith("unit_type:") else u_type
+				if u_type == "infantry":
+					real_type = "unit_type:combat_unit_type_line_infantry"
+				elif u_type == "artillery":
+					real_type = "unit_type:combat_unit_type_cannon_artillery"
+				elif u_type == "cavalry":
+					real_type = "unit_type:combat_unit_type_hussars"
+				elif u_type == "manowar":
+					real_type = "unit_type:combat_unit_type_man_o_war"
+				elif u_type == "frigate":
+					real_type = "unit_type:combat_unit_type_frigate"
+				elif u_type == "ironclad":
+					real_type = "unit_type:combat_unit_type_ironclad"
+				elif not u_type.startswith("unit_type:"):
+					real_type = f"unit_type:{u_type}"
+				else:
+					real_type = u_type
 				
-				units_str += f"\t\t\tcombat_unit = {{\n"
-				units_str += f"\t\t\t\ttype = {real_type}\n"
-				units_str += f"\t\t\t\tstate_region = {ref_state}\n"
-				units_str += f"\t\t\t\tcount = {u_count}\n"
-				units_str += f"\t\t\t}}\n"
+				units_str +=  "\n\t\t\tcombat_unit = {"
+				units_str += f"\n\t\t\t\ttype = {real_type}"
+				units_str += f"\n\t\t\t\tstate_region = {ref_state}"
+				units_str += f"\n\t\t\t\tcount = {u_count}"
+				units_str +=  "\n\t\t\t}"
 
-			new_block = new_block[:last_brace] + units_str + "\t\t}"
+			new_block = new_block[:last_brace] + units_str + "\n\t\t}"
 			
 			final_content = content[:found_start] + "create_military_formation =" + new_block + content[found_end:]
 			
@@ -7474,8 +7535,12 @@ class StateManager:
 				pop_str = ""
 				for p in p_list:
 					# Only write religion if valid
-					rel_line = f"\n\t\t\treligion = {p['religion']}" if p['religion'] else ""
-					pop_str += f"\n\t\t\tcreate_pop = {{\n\t\t\t\tculture = {p['culture']}{rel_line}\n\t\t\t\tsize = {p['size']}\n\t\t\t}}"
+					pop_str +=  "\n\t\t\tcreate_pop = {"
+					pop_str += f"\n\t\t\t\tculture = {p['culture']}"
+					if p['religion']:
+						pop_str += f"\n\t\t\t\treligion = {p['religion']}"
+					pop_str += f"\n\t\t\t\tsize = {p['size']}"
+					pop_str +=  "\n\t\t\t}"
 				pops_to_add_by_owner[owner] = pop_str
 
 			# Read Existing
@@ -7612,14 +7677,15 @@ class StateManager:
 			b_by_owner = {}
 			for b in new_b_list:
 				o = b['owner']
-				if o not in b_by_owner: b_by_owner[o] = []
+				if o not in b_by_owner:
+					b_by_owner[o] = []
 				b_by_owner[o].append(b)
 
-			b_content = "\nBUILDINGS = {\n"
-			b_content += f"\ts:{new_state_id} = {{\n"
+			b_content  =  "\nBUILDINGS = {\n"
+			b_content += f"\n\ts:{new_state_id} = {{"
 
 			for owner, b_list in b_by_owner.items():
-				b_content += f"\t\tregion_state:{owner} = {{\n"
+				b_content += f"\n\t\tregion_state:{owner} = {{"
 
 				# Aggregate
 				agg_b = {}
@@ -7632,10 +7698,13 @@ class StateManager:
 					# Generate ownership block using logic helper
 					# Using 'owner' as both Land and Building owner (nationalized)
 					ownership = self.logic.get_ownership_block(b_type, owner, lvl, new_state_id)
-					b_content += f"\t\t\tcreate_building = {{\n\t\t\t\tbuilding = \"{b_type}\"\n{ownership}\n\t\t\t}}\n"
+					b_content +=  "\n\t\t\tcreate_building = {"
+					b_content += f"\n\t\t\t\tbuilding = \"{b_type}\""
+					b_content += f"{ownership}"
+					b_content +=  "\n\t\t\t}"
 
-				b_content += "\t\t}\n"
-			b_content += "\t}\n}\n"
+				b_content += "\t\t}"
+			b_content += "\t}\n}"
 
 			final_content = b_content
 			if os.path.exists(new_b_file):
