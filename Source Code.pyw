@@ -451,7 +451,7 @@ class Vic3Logic:
 
 			# Insert
 			last_brace = block.rfind('}')
-			new_block = block[:last_brace] + additions + "\n\t}"
+			new_block = block[:last_brace].rstrip() + additions + "\n\t}"
 
 			target_content = target_content[:s] + new_block + target_content[e:]
 
@@ -2266,7 +2266,7 @@ class Vic3Logic:
 		else:
 			# Append before closing brace
 			last_brace = block.rfind('}')
-			block = block[:last_brace] + "\n\t" + capped_str + "\n" + block[last_brace:]
+			block = block[:last_brace].rstrip() + "\n\t" + capped_str + "\n" + block[last_brace:]
 
 		# C. Arable Resources
 		arable_lines = [f'"{x}"' for x in data['arable']]
@@ -2280,7 +2280,7 @@ class Vic3Logic:
 					block = block[:am.start()] + arable_str + block[ae:]
 		else:
 			last_brace = block.rfind('}')
-			block = block[:last_brace] + "\n\t" + arable_str + "\n" + block[last_brace:]
+			block = block[:last_brace].rstrip() + "\n\t" + arable_str + "\n" + block[last_brace:]
 
 		# D. Discoverable Resources
 		# First, remove ALL existing resource blocks
@@ -2302,7 +2302,7 @@ class Vic3Logic:
 
 		if res_strings:
 			last_brace = block.rfind('}')
-			block = block[:last_brace] + "\n" + "\n".join(res_strings) + "\n" + block[last_brace:]
+			block = block[:last_brace].rstrip() + "\n" + "\n".join(res_strings) + "\n" + block[last_brace:]
 
 		# Write back
 		final_content = target_content[:s] + block + target_content[e:]
@@ -2686,24 +2686,24 @@ class Vic3Logic:
 				if re.search(r"color\s*=", new_block):
 					new_block = re.sub(r"color\s*=\s*\{[^}]+\}", f"color = {{ {r} {g} {b} }}", new_block)
 				else:
-					new_block = new_block[:new_block.rfind('}')] + f"\n\tcolor = {{ {r} {g} {b} }}\n}}"
+					new_block = new_block[:new_block.rfind('}')].rstrip() + f"\n\tcolor = {{ {r} {g} {b} }}\n}}"
 				if capital:
 					if re.search(r"(capital|capital_state)\s*=", new_block):
 						new_block = re.sub(r"(capital|capital_state)\s*=\s*[A-Za-z0-9_]+", f"capital = {capital}", new_block)
 					else:
-						new_block = new_block[:new_block.rfind('}')] + f"\n\tcapital = {capital}\n}}"
+						new_block = new_block[:new_block.rfind('}')].rstrip() + f"\n\tcapital = {capital}\n}}"
 				if cultures:
 					# cultures is a list of strings
 					c_str = " ".join(cultures)
 					if re.search(r"cultures\s*=", new_block):
 						new_block = re.sub(r"cultures\s*=\s*\{[^}]+\}", f"cultures = {{ {c_str} }}", new_block)
 					else:
-						new_block = new_block[:new_block.rfind('}')] + f"\n\tcultures = {{ {c_str} }}\n}}"
+						new_block = new_block[:new_block.rfind('}')].rstrip() + f"\n\tcultures = {{ {c_str} }}\n}}"
 				if religion:
 					if re.search(r"religion\s*=", new_block):
 						new_block = re.sub(r"religion\s*=\s*[A-Za-z0-9_]+", f"religion = {religion}", new_block)
 					else:
-						new_block = new_block[:new_block.rfind('}')] + f"\n\treligion = {religion}\n}}"
+						new_block = new_block[:new_block.rfind('}')].rstrip() + f"\n\treligion = {religion}\n}}"
 
 				# Fix Bug: is_named_from_capital should be yes, not a state name
 				if re.search(r"is_named_from_capital\s*=\s*(?!yes\b)[A-Za-z0-9_]+", new_block):
@@ -2939,7 +2939,7 @@ class Vic3Logic:
 
 			# Add if missing
 			if not re.search(r"activate_law\s*=\s*(law_type:)?" + re.escape(law), new_block):
-				new_block = new_block[:new_block.rfind('}')] + f"\n\t\tactivate_law = law_type:{law}\n\t}}"
+				new_block = new_block[:new_block.rfind('}')].rstrip() + f"\n\t\tactivate_law = law_type:{law}\n\t}}"
 
 		# Ruler
 		char_idx = 0
@@ -2963,7 +2963,7 @@ class Vic3Logic:
 			if ruler_info["ig"]: rb = re.sub(r'interest_group\s*=\s*[A-Za-z0-9_]+', f'interest_group = {ruler_info["ig"]}', rb)
 			if ruler_info["ideology"]:
 				rb = re.sub(r'\s*(trait|ideology)\s*=\s*ideology_[a-z_]+', '', rb)
-				rb = rb[:rb.rfind('}')] + f"\n\t\tideology = {ruler_info['ideology']}\n\t}}"
+				rb = rb[:rb.rfind('}')].rstrip() + f"\n\t\tideology = {ruler_info['ideology']}\n\t}}"
 			new_block = new_block[:ruler_start] + rb + new_block[ruler_end:]
 		else:	# todo: check
 			# Create new ruler block if none found (overrides/adds to vanilla)
@@ -2978,7 +2978,7 @@ class Vic3Logic:
 			interest_group = {ruler_info['ig']}{ideo_line}
 		}}"""
 			# Insert before closing brace of country block
-			new_block = new_block[:new_block.rfind('}')] + new_ruler_block + "\n\t}"
+			new_block = new_block[:new_block.rfind('}')].rstrip() + new_ruler_block + "\n\t}"
 
 		target_content = target_content[:s] + new_block + target_content[e:]
 		with open(target_path, 'w', encoding='utf-8-sig') as f:
@@ -3647,8 +3647,6 @@ class Vic3Logic:
 		mode = 'a' if os.path.exists(fpath) else 'w'
 		try:
 			with open(fpath, mode, encoding='utf-8-sig') as f:
-				if mode == 'a':
-					f.write("\n")	# todo
 				f.write(content_block)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save culture: {e}", 'error')
@@ -3689,8 +3687,6 @@ class Vic3Logic:
 		mode = 'a' if os.path.exists(fpath) else 'w'
 		try:
 			with open(fpath, mode, encoding='utf-8-sig') as f:
-				if mode == 'a':
-					f.write("\n")
 				f.write(content_block)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save religion: {e}", 'error')
@@ -4089,7 +4085,7 @@ class Vic3Logic:
 			if pbs is not None:
 				new_entry = f"\n\tc:{clean_tag} ?= {{{create_block}{extra_block}\n\t}}"
 				# Insert before closing brace
-				content = content[:pbe-1] + new_entry + "\n}" + content[pbe:]
+				content = content[:pbe-1].rstrip() + new_entry + "\n}" + content[pbe:]
 			else:
 				# Wrap everything? Or append?
 				content += f"POWER_BLOCS = {{\n\tc:{clean_tag} ?= {{{create_block}{extra_block}\n\t}}\n}}"
@@ -4773,7 +4769,7 @@ class Vic3Logic:
 			block = re.sub(r"\s*add_homeland\s*=\s*[A-Za-z0-9_:]+", "", block)
 			# Insert new ones before closing brace
 			last_brace = block.rfind('}')
-			new_block = block[:last_brace] + "\n" + new_homelands_str + "\n\t}"
+			new_block = block[:last_brace].rstrip() + "\n" + new_homelands_str + "\n\t}"
 			content = content[:s] + new_block + content[e:]
 		else:
 			# Create block if new file
@@ -4781,7 +4777,7 @@ class Vic3Logic:
 			# Append to STATES block if exists, or append to file
 			ss, se = self.get_block_range_safe(content, "STATES")
 			if ss is not None:
-				content = content[:se-1] + new_entry + "\n}" + content[se:]
+				content = content[:se-1].rstrip() + new_entry + "\n}" + content[se:]
 			else:
 				content += f"\nSTATES = {{{new_entry}\n}}"
 
@@ -4957,7 +4953,7 @@ class Vic3Logic:
 					rs_s, rs_e = self.find_block_content(state_block, m.end()-1)
 					if rs_s:
 						# Append to end of region_state block
-						new_rs_block = state_block[m.start():rs_e-1] + new_pops_str + "\n\t\t}"	# todo
+						new_rs_block = state_block[m.start():rs_e-1].rstrip() + new_pops_str + "\n\t\t}"
 						state_block = state_block[:m.start()] + new_rs_block + state_block[rs_e:]
 						content = content[:s] + state_block + content[e:]
 				else:
@@ -4967,7 +4963,7 @@ class Vic3Logic:
 						f"{new_pops_str}"
 						f"\n\t\t}}"
 			   		)
-					state_block = state_block[:state_block.rfind('}')] + new_rs + "\n\t}"
+					state_block = state_block[:state_block.rfind('}')].rstrip() + new_rs + "\n\t}"
 					content = content[:s] + state_block + content[e:]
 			else:
 				# Create state block
@@ -4977,10 +4973,10 @@ class Vic3Logic:
 					f"{new_pops_str}"
 					f"\n\t\t}}"
 					f"\n\t}}"
-				)	# todo: check
+				)
 				ps, pe = self.get_block_range_safe(content, "POPS")
 				if ps is not None:
-					content = content[:pe-1] + new_entry + "\n}" + content[pe:]
+					content = content[:pe-1].rstrip() + new_entry + "\n}" + content[pe:]
 				else:
 					content += f"\nPOPS = {{{new_entry}\n}}"	# todo
 
@@ -5888,7 +5884,7 @@ class Vic3Logic:
 				if not current_content.strip():
 					new_content = entry_content
 				else:
-					new_content = current_content + "\n\n" + entry_content	# todo
+					new_content = current_content.rstrip() + "\n\n" + entry_content.lstrip()
 
 			with open(target_file, 'w', encoding='utf-8-sig') as f:
 				f.write(new_content)
@@ -6580,7 +6576,7 @@ class Vic3Logic:
 				block = re.sub(r"levels\s*=\s*\d+", f"levels = {new_level}", block, count=1)
 			else:
 				last_brace = block.rfind('}')
-				block = block[:last_brace] + f"\n\t\t\t\tlevel = {new_level}\n\t\t\t}}"
+				block = block[:last_brace].rstrip() + f"\n\t\t\t\tlevel = {new_level}\n\t\t\t}}"
 			# self.log("[TRACE] save_state_building block after level update:")	# todo
 			# self.log(block)
 
@@ -6629,7 +6625,7 @@ class Vic3Logic:
 
 				# Insert before closing brace
 				last_brace = block.rfind('}')
-				block = block[:last_brace] + ownership_block + "\n\t\t\t}"
+				block = block[:last_brace].rstrip() + ownership_block + "\n\t\t\t}"
 				# self.log("[TRACE] save_state_building block after ownership update:")	# todo
 				# self.log(block)
 
@@ -6675,20 +6671,20 @@ class Vic3Logic:
 
 				if found_rs:
 					# Insert into existing region_state
-					new_state_block = state_block[:rs_insert_idx] + "\n" + block + state_block[rs_insert_idx:]
+					new_state_block = state_block[:rs_insert_idx] + "\t" + block + "\n\t\t" + state_block[rs_insert_idx:]
 					content = content_without_old[:s_idx] + new_state_block + content_without_old[e_idx:]
 				else:
 					# Create new region_state
 					new_rs = (
 						f"\n\t\tregion_state:{clean_new_land} = {{"
-						f"{block}"
+						f"\n\t\t\t{block}"
 						f"\n\t\t}}"
 					)
 					# self.log("[TRACE] save_state_building new region_state block:")
 					# self.log(new_rs)	# todo
 					# Insert at end of state block
 					last_sb_brace = state_block.rfind('}')
-					new_state_block = state_block[:last_sb_brace] + new_rs + "\n\t}"
+					new_state_block = state_block[:last_sb_brace].rstrip() + new_rs + "\n\t}"
 					content = content_without_old[:s_idx] + new_state_block + content_without_old[e_idx:]
 			else:
 				# State not found? Should not happen since we just read it.
@@ -6809,7 +6805,7 @@ class Vic3Logic:
 				)
 				# self.log("[TRACE] add_state_building new region_state block:")	# todo
 				# self.log(new_rs)
-				new_state_block = state_block[:state_block.rfind('}')] + new_rs + "\n\t}"
+				new_state_block = state_block[:state_block.rfind('}')].rstrip() + new_rs + "\n\t}"
 				target_content = target_content[:s] + new_state_block + target_content[e:]
 		else:
 			new_entry = (
@@ -6821,7 +6817,7 @@ class Vic3Logic:
 			)
 			bs, be = self.get_block_range_safe(target_content, "BUILDINGS")
 			if bs is not None:
-				target_content = target_content[:be-1] + new_entry + "\n\t\t}" + target_content[be:]	# todo: check
+				target_content = target_content[:be-1].rstrip() + new_entry + "\n}" + target_content[be:]
 			else:
 				target_content += f"\nBUILDINGS = {{{new_entry}\n}}"	# todo: check
 
@@ -7353,14 +7349,9 @@ class Vic3Logic:
 					f"\n\t\t\t}}"
 				)
 
-			new_block = new_block[:last_brace] + units_str + "\n\t\t}"	# todo
-			
-			final_content = content[:found_start] + (
-				f"\n\t\tcreate_military_formation = {{"
-				f"\n\t\t\t# made with save_military_formation"
-				f"{new_block}"
-				f"\n\t\t}}"
-			) + content[found_end:]	# todo: check
+			new_block = new_block[:last_brace].rstrip() + units_str + "\n\t\t}"
+
+			final_content = content[:found_start] + "create_military_formation = " + new_block + content[found_end:]
 			
 			with open(file_path, 'w', encoding='utf-8-sig') as f:
 				f.write(final_content)
@@ -8662,14 +8653,14 @@ class StateManager:
 						block = re.sub(r"arable_land\s*=\s*\d+", f"arable_land = {sobj.arable_land}", block)
 					else:
 						# Append before closing brace
-						block = block[:-1] + f"\n\tarable_land = {sobj.arable_land}\n}}"
+						block = block[:-1].rstrip() + f"\n\tarable_land = {sobj.arable_land}\n}}"
 
 				for k, v in sobj.hubs.items():
 					if v:
 						if re.search(fr"{k}\s*=", block):
 							block = re.sub(fr'{k}\s*=\s*"?([xX0-9A-Fa-f]+)"?', f'{k} = "{v}"', block)
 						else:
-							block = block[:-1] + f'\n\t{k} = "{v}"\n}}'
+							block = block[:-1].rstrip() + f'\n\t{k} = "{v}"\n}}'
 					else:
 						# Hub removed/None, strip from file if present
 						if re.search(fr"{k}\s*=", block):
@@ -8677,7 +8668,7 @@ class StateManager:
 
 				content = content[:s] + block + content[e:]
 		else:
-			content += "\n" + new_block
+			content += new_block
 
 		with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
 		self.logic.log(f"Saved state geometry to {os.path.basename(target_path)}")
@@ -8785,7 +8776,7 @@ class StateManager:
 										if folder == "buildings":
 											to_append = re.sub(r'region\s*=\s*"(s:)?' + re.escape(old_state_id) + r'"', f'region = "{new_state_id}"', to_append)
 
-										updated_ns_rs = ns_block[nm_rs.start():nrs_e-1] + "\n" + to_append + "\n\t\t}"
+										updated_ns_rs = ns_block[nm_rs.start():nrs_e-1].rstrip() + to_append.rstrip() + "\n\t\t}"
 										updated_ns_block = ns_block[:nm_rs.start()] + updated_ns_rs + ns_block[nrs_e:]
 										new_file_content = new_file_content[:ns] + updated_ns_block + new_file_content[ne:]
 								else:
@@ -8794,7 +8785,7 @@ class StateManager:
 										to_append = re.sub(r'region\s*=\s*"(s:)?' + re.escape(old_state_id) + r'"', f'region = "{new_state_id}"', to_append)
 
 									last_brace = ns_block.rfind('}')
-									updated_ns_block = ns_block[:last_brace] + "\n\t\t" + to_append + "\n\t}"
+									updated_ns_block = ns_block[:last_brace].rstrip() + "\n\t\t" + to_append + "\n\t}"
 									new_file_content = new_file_content[:ns] + updated_ns_block + new_file_content[ne:]
 
 								with open(new_file_path, 'w', encoding='utf-8-sig') as f: f.write(new_file_content)
