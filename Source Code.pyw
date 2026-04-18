@@ -1250,7 +1250,7 @@ class Vic3Logic:
 		if building_type in self.CAT_A_STATE or economic_law == "law_command_economy":
 			return (
 				f"\n\t\t\t\t\tcountry = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 1"
+				# f"\n\t\t\t\t\t\t# get_ownership_content branch 1"
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t}}"
@@ -1258,7 +1258,7 @@ class Vic3Logic:
 		elif building_type in self.CAT_B_SELFO:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 2"
+				# f"\n\t\t\t\t\t\t# get_ownership_content branch 2"
 				f"\n\t\t\t\t\t\ttype = \"{building_type}\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1268,7 +1268,7 @@ class Vic3Logic:
 		elif building_type in self.CAT_C_RURAL or economic_law in {"law_traditionalism", "law_agrarianism"}:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 3"
+				# f"\n\t\t\t\t\t\t# get_ownership_content branch 3"
 				f"\n\t\t\t\t\t\ttype = \"building_manor_house\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1278,7 +1278,7 @@ class Vic3Logic:
 		elif economic_law in {"law_interventionism", "law_laissez_faire"}:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 4"
+				# f"\n\t\t\t\t\t\t# get_ownership_content branch 4"
 				f"\n\t\t\t\t\t\ttype = \"building_financial_district\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1288,7 +1288,7 @@ class Vic3Logic:
 		else:
 			return (
 				f"\n\t\t\t\t\tcountry = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 5"
+				# f"\n\t\t\t\t\t\t# get_ownership_content branch 5"
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t}}"
@@ -1389,8 +1389,12 @@ class Vic3Logic:
 
 			inner_parts.append(f'levels = {levels}')
 
-			inner_str = " ".join(inner_parts)
-			lines.append(f'\n\t\t\t\t\t{wrapper} = {{ {inner_str} }}')	# todo
+			inner_str = "\n\t\t\t\t\t\t" + "\n\t\t\t\t\t\t".join(inner_parts)
+			lines.append((
+				f"\n\t\t\t\t\t{wrapper} = {{"
+				f"{inner_str}"
+				f"\n\t\t\t\t\t}}"
+			))	# todo: check output
 
 		return "\n".join(lines)
 
@@ -1515,7 +1519,7 @@ class Vic3Logic:
 										# Just inject the consolidated content if it changed
 										new_ao_block = (
 											f"\n\t\t\t\tadd_ownership = {{"
-											f"\n\t\t\t\t# made with fix_building_ownership new_ao_block"
+											f"\n\t\t\t\t\t# made with fix_building_ownership new_ao_block"
 											f"{consolidated}"
 											f"\n\t\t\t\t}}"
 										)
@@ -4476,13 +4480,13 @@ class Vic3Logic:
 														new_ao_parts.append(ao_content[e_start:])
 														break # Parsing error
 
-												if ao_modified:
+												if ao_modified:	# todo
 													new_ao_block = (
 														"\n\t\t\t\tadd_ownership = {"
-														"\n\t\t\t\t\t# made with clean_transferred_state_references ao_modified"
-													) + "".join(new_ao_parts) + "\n\t\t\t\t}"	# todo
+														# "\n\t\t\t\t\t# made with clean_transferred_state_references ao_modified"
+													) + "".join(new_ao_parts).strip() + "\n\t\t\t\t}"
 													new_b_inner = b_inner[:am.start()] + new_ao_block + b_inner[as_e:]
-													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner + "\n\t\t\t}"	# todo: check
+													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner + "\n\t\t\t}"
 													new_rs_parts.append(new_b_full)
 												else:
 													new_rs_parts.append(b_full)
@@ -6817,7 +6821,7 @@ class Vic3Logic:
 			)
 			bs, be = self.get_block_range_safe(target_content, "BUILDINGS")
 			if bs is not None:
-				target_content = target_content[:be-1] + new_entry + "\n}" + target_content[be:]
+				target_content = target_content[:be-1] + new_entry + "\n\t\t}" + target_content[be:]	# todo: check
 			else:
 				target_content += f"\nBUILDINGS = {{{new_entry}\n}}"	# todo: check
 
