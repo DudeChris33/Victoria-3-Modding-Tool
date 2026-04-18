@@ -24,7 +24,8 @@ except ImportError:
 
 class Vic3Logic:
 	CAT_A_STATE = ["building_government_administration", "building_construction_sector", "building_university", "building_barrack", "building_port", "building_conscription_center"]
-	CAT_B_RURAL = ["building_wheat_farm", "building_rye_farm", "building_rice_farm", "building_maize_farm", "building_millet_farm", "building_livestock_ranch", "building_logging_camp", "building_rubber_plantation", "building_cotton_plantation", "building_coffee_plantation", "building_tea_plantation", "building_tobacco_plantation", "building_sugar_plantation", "building_vineyard", "building_fruit_plantation", "building_silk_plantation", "building_dye_plantation", "building_opium_plantation", "building_fishing_wharf", "building_whaling_station"]
+	CAT_B_SELFO = ["building_iron_mine", "building_coal_mine", "building_logging_camp", "building_fishing_wharf", "building_whaling_station", "building_textile_mill"]
+	CAT_C_RURAL = ["building_wheat_farm", "building_rye_farm", "building_rice_farm", "building_maize_farm", "building_millet_farm", "building_livestock_ranch", "building_rubber_plantation", "building_cotton_plantation", "building_coffee_plantation", "building_tea_plantation", "building_tobacco_plantation", "building_sugar_plantation", "building_vineyard", "building_fruit_plantation", "building_silk_plantation", "building_dye_plantation", "building_opium_plantation"]
 
 	def __init__(self, log_callback):
 		self.log = log_callback
@@ -1041,7 +1042,7 @@ class Vic3Logic:
 			os.path.join(self.mod_path, "common/history/military_formations"),
 			os.path.join(self.mod_path, "common/history/characters")
 		]
-		scope_regex = re.compile(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)	# todo
+		scope_regex = re.compile(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)	# todo: carlists
 
 		for p in paths:
 			if not os.path.exists(p): continue
@@ -1246,7 +1247,7 @@ class Vic3Logic:
 		clean_state = state_name.replace("s:", "").strip()
 		economic_law = self.get_country_economic_law(clean_owner)
 		
-		if building_type in self.CAT_A_STATE or economic_law == "law_command_economy":	# todo: existing owners should be kept
+		if building_type in self.CAT_A_STATE or economic_law == "law_command_economy":
 			return (
 				f"\n\t\t\t\t\tcountry = {{"
 				f"\n\t\t\t\t\t\t# get_ownership_content branch 1"
@@ -1254,10 +1255,20 @@ class Vic3Logic:
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t}}"
 			)
-		elif building_type in self.CAT_B_RURAL or economic_law in {"law_traditionalism", "law_agrarianism"}:
+		elif building_type in self.CAT_B_SELFO:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
 				f"\n\t\t\t\t\t\t# get_ownership_content branch 2"
+				f"\n\t\t\t\t\t\ttype = \"{building_type}\""
+				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
+				f"\n\t\t\t\t\t\tlevels = {level}"
+				f"\n\t\t\t\t\t\tregion = \"{clean_state}\""
+				f"\n\t\t\t\t\t}}"
+			)
+		elif building_type in self.CAT_C_RURAL or economic_law in {"law_traditionalism", "law_agrarianism"}:
+			return (
+				f"\n\t\t\t\t\tbuilding = {{"
+				f"\n\t\t\t\t\t\t# get_ownership_content branch 3"
 				f"\n\t\t\t\t\t\ttype = \"building_manor_house\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1267,7 +1278,7 @@ class Vic3Logic:
 		elif economic_law in {"law_interventionism", "law_laissez_faire"}:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 3"
+				f"\n\t\t\t\t\t\t# get_ownership_content branch 4"
 				f"\n\t\t\t\t\t\ttype = \"building_financial_district\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1277,7 +1288,7 @@ class Vic3Logic:
 		else:
 			return (
 				f"\n\t\t\t\t\tcountry = {{"
-				f"\n\t\t\t\t\t\t# get_ownership_content branch 4"
+				f"\n\t\t\t\t\t\t# get_ownership_content branch 5"
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t}}"
@@ -1306,82 +1317,82 @@ class Vic3Logic:
 			f"\n\t\t\t\t}}"
 		)
 
-	# def consolidate_ownership(self, content):
-	# 	"""Merges duplicate ownership entries in add_ownership block."""
-	# 	blocks = []
-	# 	cursor = 0
-	# 	while True:
-	# 		m = re.search(r"(building|country)\s*=\s*\{", content[cursor:])
-	# 		if not m:
-	# 			break
+	def consolidate_ownership(self, content):	# todo: needed?
+		"""Merges duplicate ownership entries in add_ownership block."""
+		blocks = []
+		cursor = 0
+		while True:
+			m = re.search(r"(building|country)\s*=\s*\{", content[cursor:])
+			if not m:
+				break
 
-	# 		abs_start = cursor + m.start()
-	# 		s, e = self.find_block_content(content, cursor + m.end() - 1)
+			abs_start = cursor + m.start()
+			s, e = self.find_block_content(content, cursor + m.end() - 1)
 
-	# 		if s is not None:
-	# 			block_type = m.group(1)
-	# 			inner = content[s+1:e-1]
+			if s is not None:
+				block_type = m.group(1)
+				inner = content[s+1:e-1]
 
-	# 			parsed = {}
-	# 			t_m = re.search(r'type\s*=\s*"?([A-Za-z0-9_]+)"?', inner)
-	# 			parsed['type'] = t_m.group(1) if t_m else (block_type if block_type == "country" else "unknown")
+				parsed = {}
+				t_m = re.search(r'type\s*=\s*"?([A-Za-z0-9_]+)"?', inner)
+				parsed['type'] = t_m.group(1) if t_m else (block_type if block_type == "country" else "unknown")
 
-	# 			c_m = re.search(r'country\s*=\s*"?([A-Za-z0-9_:]+)"?', inner)
-	# 			parsed['country'] = c_m.group(1) if c_m else None
+				c_m = re.search(r'country\s*=\s*"?([A-Za-z0-9_:]+)"?', inner)
+				parsed['country'] = c_m.group(1) if c_m else None
 
-	# 			r_m = re.search(r'region\s*=\s*"?([A-Za-z0-9_:]+)"?', inner)
-	# 			parsed['region'] = r_m.group(1) if r_m else None
+				r_m = re.search(r'region\s*=\s*"?([A-Za-z0-9_:]+)"?', inner)
+				parsed['region'] = r_m.group(1) if r_m else None
 
-	# 			cp_m = re.search(r'company\s*=\s*"?([A-Za-z0-9_:]+)"?', inner)
-	# 			parsed['company'] = cp_m.group(1) if cp_m else None
+				cp_m = re.search(r'company\s*=\s*"?([A-Za-z0-9_:]+)"?', inner)
+				parsed['company'] = cp_m.group(1) if cp_m else None
 
-	# 			l_m = re.search(r'levels\s*=\s*(\d+)', inner)
-	# 			parsed['levels'] = int(l_m.group(1)) if l_m else 0
+				l_m = re.search(r'levels\s*=\s*(\d+)', inner)
+				parsed['levels'] = int(l_m.group(1)) if l_m else 0
 
-	# 			blocks.append(parsed)
-	# 			cursor = e
-	# 		else:
-	# 			cursor = abs_start + 1
+				blocks.append(parsed)
+				cursor = e
+			else:
+				cursor = abs_start + 1
 
-	# 	merged = {}
-	# 	# Dicts preserve insertion order (Python 3.7+)
+		merged = {}
+		# Dicts preserve insertion order (Python 3.7+)
 
-	# 	for b in blocks:
-	# 		# Key tuple: type, country, region, company
-	# 		key = (b['type'], b['country'], b['region'], b['company'])
+		for b in blocks:
+			# Key tuple: type, country, region, company
+			key = (b['type'], b['country'], b['region'], b['company'])
 
-	# 		if key in merged:
-	# 			merged[key] += b['levels']
-	# 		else:
-	# 			merged[key] = b['levels']
+			if key in merged:
+				merged[key] += b['levels']
+			else:
+				merged[key] = b['levels']
 
-	# 	lines = []
-	# 	for key, levels in merged.items():
-	# 		b_type, b_country, b_region, b_company = key
+		lines = []
+		for key, levels in merged.items():
+			b_type, b_country, b_region, b_company = key
 
-	# 		wrapper = "building"
-	# 		if b_type == "country":
-	# 			wrapper = "country"
+			wrapper = "building"
+			if b_type == "country":
+				wrapper = "country"
 
-	# 		inner_parts = []
-	# 		if b_type != "country" and b_type != "unknown":
-	# 			inner_parts.append(f'type = "{b_type}"')
+			inner_parts = []
+			if b_type != "country" and b_type != "unknown":
+				inner_parts.append(f'type = "{b_type}"')
 
-	# 		if b_country:
-	# 			inner_parts.append(f'country = "{b_country}"')
+			if b_country:
+				inner_parts.append(f'country = "{b_country}"')
 
-	# 		if b_region:
-	# 			inner_parts.append(f'region = "{b_region}"')
+			if b_region:
+				inner_parts.append(f'region = "{b_region}"')
 
-	# 		if b_company:
-	# 			inner_parts.append(f'company = "{b_company}"')
+			if b_company:
+				inner_parts.append(f'company = "{b_company}"')
 
-	# 		inner_parts.append(f'levels = {levels}')
+			inner_parts.append(f'levels = {levels}')
 
-	# 		inner_str = " ".join(inner_parts)
-	# 		lines.append(f'\t\t\t\t\t{wrapper} = {{ {inner_str} }}')	# todo
+			inner_str = " ".join(inner_parts)
+			lines.append(f'\n\t\t\t\t\t{wrapper} = {{ {inner_str} }}')	# todo
 
-	# 	return "\n".join(lines)
+		return "\n".join(lines)
 
 	def fix_building_ownership(self, block_content, owner_tag, state_name):
 		"""Ensures all create_building blocks in the target region have explicit ownership."""
@@ -1467,8 +1478,8 @@ class Vic3Logic:
 								if ao_s:
 									ao_content = cb_inner[ao_s+1:ao_e-1]
 
-									# # CONSOLIDATE FIRST: Merge duplicates caused by replacements
-									# consolidated = self.consolidate_ownership(ao_content)
+									# CONSOLIDATE FIRST: Merge duplicates caused by replacements
+									consolidated = self.consolidate_ownership(ao_content)
 
 									# If consolidation resulted in empty (invalid/empty input), force rewrite
 									if not consolidated.strip():
@@ -1502,9 +1513,13 @@ class Vic3Logic:
 										inner_modified = True
 									else:
 										# Just inject the consolidated content if it changed
-										new_ao_block = f"add_ownership = {{\n{consolidated}\n\t\t\t\t}}"
-										self.log(consolidated)	# todo
-
+										new_ao_block = (
+											f"\n\t\t\t\tadd_ownership = {{"
+											f"\n\t\t\t\t# made with fix_building_ownership new_ao_block"
+											f"{consolidated}"
+											f"\n\t\t\t\t}}"
+										)
+										
 										# Reconstruct create_building block with new add_ownership
 										new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
 										new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
@@ -4445,11 +4460,12 @@ class Vic3Logic:
 															# Extract Level
 															lvl = 1
 															lm = re.search(r"levels?\s*=\s*(\d+)", entry_inner)
-															if lm: lvl = int(lm.group(1))
+															if lm:
+																lvl = int(lm.group(1))
 
 															# Generate new valid entry (Nationalize to Land Owner)
-															new_entry = "\n\t\t\t\t\t" + self.get_ownership_content(b_type, land_owner_tag, lvl, local_state)
-															new_ao_parts.append(new_entry)	# todo
+															new_entry = self.get_ownership_content(b_type, land_owner_tag, lvl, local_state)
+															new_ao_parts.append(new_entry)	# todo: important point for possible rework
 															ao_modified = True
 															file_modified = True
 														else:
@@ -4461,10 +4477,12 @@ class Vic3Logic:
 														break # Parsing error
 
 												if ao_modified:
-													new_ao_block = "add_ownership = {" + "".join(new_ao_parts) + "}"	# todo
-													self.log(new_ao_block)
+													new_ao_block = (
+														"\n\t\t\t\tadd_ownership = {"
+														"\n\t\t\t\t\t# made with clean_transferred_state_references ao_modified"
+													) + "".join(new_ao_parts) + "\n\t\t\t\t}"	# todo
 													new_b_inner = b_inner[:am.start()] + new_ao_block + b_inner[as_e:]
-													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner + "}"
+													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner + "\n\t\t\t}"	# todo: check
 													new_rs_parts.append(new_b_full)
 												else:
 													new_rs_parts.append(b_full)
@@ -6750,7 +6768,7 @@ class Vic3Logic:
 			f"\n\t\t\t\treserves = 1"
 			f"\n\t\t\t}}"
 		)	# todo
-		self.log(new_b_block)
+		# self.log(new_b_block)
 
 		s, e = self.get_block_range_safe(target_content, f"s:{clean_state}")
 
@@ -7925,7 +7943,7 @@ class StateManager:
 			b_content += f"\n\ts:{new_state_id} = {{"
 
 			for owner, b_list in b_by_owner.items():
-				b_content += f"\n\t\tregion_state:{owner} = {{"	# todo
+				b_content += f"\n\t\tregion_state:{owner} = {{"
 
 				# Aggregate
 				agg_b = {}
@@ -7938,10 +7956,10 @@ class StateManager:
 					# Generate ownership block using logic helper
 					# Using 'owner' as both Land and Building owner (nationalized)
 					ownership = self.logic.get_ownership_block(b_type, owner, lvl, new_state_id)
-					b_content +=  "\n\t\t\tcreate_building = {"
+					b_content += f"\n\t\t\tcreate_building = {{"
 					b_content += f"\n\t\t\t\tbuilding = \"{b_type}\""
 					b_content += f"{ownership}"
-					b_content +=  "\n\t\t\t}"
+					b_content += f"\n\t\t\t}}"
 				b_content += "\n\t\t}"
 			b_content += "\n\t}"
 			b_content += "\n}"
