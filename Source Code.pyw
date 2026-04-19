@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import shutil
 import traceback
@@ -1398,7 +1398,7 @@ class Vic3Logic:
 
 		return "\n".join(lines)
 
-	def fix_building_ownership(self, block_content, owner_tag, state_name):
+	def fix_building_ownership(self, block_content, owner_tag, state_name, old_tag=None):
 		"""Ensures all create_building blocks in the target region have explicit ownership."""
 
 		# Find region_state block for owner_tag
@@ -1482,6 +1482,15 @@ class Vic3Logic:
 								if ao_s:
 									ao_content = cb_inner[ao_s+1:ao_e-1]
 
+									# Rule 1: Building owned by a building in the same state.
+									# The country tags have already been swapped upstream — preserve the block exactly.
+									if (re.search(r"building\s*=\s*\{", ao_content) and
+											re.search(r'region\s*=\s*"?' + re.escape(state_name) + r'"?', ao_content, re.IGNORECASE)):
+										new_inner_parts.append(cb_full)
+										inner_cursor = cb_e
+										last_inner_idx = cb_e
+										continue
+
 									# CONSOLIDATE FIRST: Merge duplicates caused by replacements
 									consolidated = self.consolidate_ownership(ao_content)
 
@@ -1503,9 +1512,70 @@ class Vic3Logic:
 
 										requires_special = b_type not in self.CAT_A_STATE
 
-										# If strict rewrite needed (converting old format to new format)
-										if (is_country_type and requires_special) or is_company_type:
-											should_rewrite = True
+										# Rule 2: Company-owned building — preserve ownership or rewrite if company disbanded
+										if is_company_type:
+											co_m = re.search(r"company\s*=\s*\{[^}]*?country\s*=\s*c:([A-Za-z0-9_]+)", consolidated, re.DOTALL)
+											company_country = co_m.group(1).upper() if co_m else None
+
+											if company_country and old_tag and company_country.upper() == owner_tag.upper():
+												# Company country was swapped upstream (old_tag -> owner_tag).
+												# The real company home country was old_tag.
+												if self.get_states_owned_by_country(old_tag):
+													# old_tag still owns states -> restore company ownership (un-swap)
+													fixed_consolidated = re.sub(
+														r"(company\s*=\s*\{[^}]*?country\s*=\s*c:)" + re.escape(owner_tag),
+														r"\g<1>" + old_tag,
+														consolidated, flags=re.IGNORECASE | re.DOTALL
+													)
+													new_ao_block = (
+														f"\n\t\t\t\tadd_ownership = {{"
+														f"{fixed_consolidated}"
+														f"\n\t\t\t\t}}"
+													)
+													new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
+													new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
+													new_inner_parts.append(new_cb_block)
+													inner_modified = True
+													inner_cursor = cb_e
+													last_inner_idx = cb_e
+													continue
+												else:
+													# old_tag has no states left -> company disbanded, rewrite to self-ownership
+													should_rewrite = True
+											else:
+												# Company belongs to a third country (not old_tag) -> preserve as-is
+												new_ao_block = (
+													f"\n\t\t\t\tadd_ownership = {{"
+													f"{consolidated}"
+													f"\n\t\t\t\t}}"
+												)
+												new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
+												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
+												new_inner_parts.append(new_cb_block)
+												inner_modified = True
+												inner_cursor = cb_e
+												last_inner_idx = cb_e
+												continue
+
+										# Rule 3: Country-owned building — if owned by the state owner, change with state;
+										# if owned by an uninvolved third country, preserve their ownership.
+										if is_country_type and requires_special:
+											country_m = re.search(r'\bc:([A-Za-z0-9_]+)\b', consolidated)
+											actual_tag = country_m.group(1).upper() if country_m else owner_tag.upper()
+
+											if actual_tag.upper() != owner_tag.upper():
+												# Third-country ownership: convert format but keep their tag
+												new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
+												ownership_block = self.get_ownership_block(b_type, actual_tag, total_levels, state_name)
+												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
+												new_inner_parts.append(new_cb_block)
+												inner_modified = True
+												inner_cursor = cb_e
+												last_inner_idx = cb_e
+												continue
+											else:
+												# Building owned by the state owner — changes with state ownership
+												should_rewrite = True
 
 									if should_rewrite:
 										# Regenerate completely
@@ -1519,7 +1589,6 @@ class Vic3Logic:
 										# Just inject the consolidated content if it changed
 										new_ao_block = (
 											f"\n\t\t\t\tadd_ownership = {{"
-											f"\n\t\t\t\t\t# made with fix_building_ownership new_ao_block"
 											f"{consolidated}"
 											f"\n\t\t\t\t}}"
 										)
@@ -1569,7 +1638,7 @@ class Vic3Logic:
 			content = re.sub(r'region\s*=\s*"(s:)?STATE_[A-Za-z0-9_]+"', target_region_str, content, flags=re.IGNORECASE)
 			# Fix ownership
 			clean_new = new_tag.replace("c:", "").strip()
-			content = self.fix_building_ownership(content, clean_new, state_str)
+			content = self.fix_building_ownership(content, clean_new, state_str, old_tag=old_tag)
 		return content
 
 	def merge_split_state(self, content, state_name, old_tag, new_tag, folder):
@@ -1655,7 +1724,7 @@ class Vic3Logic:
 				new_c = re.sub(f"c:{re.escape(clean_old)}", f"c:{clean_new}", new_c, flags=re.IGNORECASE)
 
 				if folder == "buildings":
-					new_c = self.fix_building_ownership(new_c, clean_new, state_name)
+					new_c = self.fix_building_ownership(new_c, clean_new, state_name, old_tag=clean_old)
 
 				first = old_range if old_range[0] < new_range[0] else new_range
 				second = new_range if old_range[0] < new_range[0] else old_range
@@ -3940,12 +4009,15 @@ class Vic3Logic:
 		target_file = os.path.join(loc_dir, "mod_power_blocs_l_english.yml")
 
 		if not os.path.exists(target_file):
-			with open(target_file, 'w', encoding='utf-8-sig') as f: f.write("l_english:\n")
+			with open(target_file, 'w', encoding='utf-8-sig') as f:
+				f.write("l_english:\n")
 
 		try:
-			with open(target_file, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with open(target_file, 'r', encoding='utf-8-sig') as f:
+				content = f.read()
 		except:
-			with open(target_file, 'r', encoding='utf-8') as f: content = f.read()
+			with open(target_file, 'r', encoding='utf-8') as f:
+				content = f.read()
 
 		# Escape quotes
 		safe_name = name.replace('"', '\\"')
@@ -3972,7 +4044,8 @@ class Vic3Logic:
 			if not content.endswith("\n"): content += "\n"
 			content += new_line_adj + "\n"
 
-		with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with open(target_file, 'w', encoding='utf-8-sig') as f:
+			f.write(content)
 		self.log(f"[SAVE] Power Bloc localization saved to {target_file}", 'success')
 
 	def save_power_bloc_data(self, tag, data):
@@ -3984,12 +4057,15 @@ class Vic3Logic:
 
 		# If file doesn't exist, create it with wrapper
 		if not os.path.exists(target_file):
-			with open(target_file, 'w', encoding='utf-8-sig') as f: f.write("POWER_BLOCS = {\n}\n")
+			with open(target_file, 'w', encoding='utf-8-sig') as f:
+				f.write("POWER_BLOCS = {\n}\n")
 
 		try:
-			with open(target_file, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with open(target_file, 'r', encoding='utf-8-sig') as f:
+				content = f.read()
 		except:
-			with open(target_file, 'r', encoding='utf-8') as f: content = f.read()
+			with open(target_file, 'r', encoding='utf-8') as f:
+				content = f.read()
 
 		clean_tag = tag.replace("c:", "").strip()
 
@@ -4098,22 +4174,27 @@ class Vic3Logic:
 		"""Removes power bloc definition for a tag."""
 		self.perform_auto_backup()
 		hist_dir = os.path.join(self.mod_path, "common/history/power_blocs")
-		if not os.path.exists(hist_dir): return
+		if not os.path.exists(hist_dir):
+			return
 		clean_tag = tag.replace("c:", "").strip()
 
 		for root, _, files in os.walk(hist_dir):
 			for file in files:
-				if not file.endswith(".txt"): continue
+				if not file.endswith(".txt"):
+					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with open(path, 'r', encoding='utf-8-sig') as f:
+						content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with open(path, 'r', encoding='utf-8') as f:
+						content = f.read()
 
 				s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
 				if s is not None:
 					content = content[:s] + content[e:]
-					with open(path, 'w', encoding='utf-8-sig') as f: f.write(content)
+					with open(path, 'w', encoding='utf-8-sig') as f:
+						f.write(content)
 					self.log(f"[REMOVE] Power Bloc removed for {clean_tag}", 'success')
 					return
 
@@ -4601,7 +4682,7 @@ class Vic3Logic:
 								rs_content = re.sub(r"create_building\s*=\s*\{\s*\}", "", rs_content)
 
 								# 3. Fix Ownership (Pass State Name!)
-								rs_content = self.fix_building_ownership(rs_content, effective_owner, state_name)
+								rs_content = self.fix_building_ownership(rs_content, effective_owner, state_name, old_tag=clean_old)
 
 								if rs_content != original_rs_content:
 									# Replace in state_body_new
@@ -4678,6 +4759,37 @@ class Vic3Logic:
 								cursor += 1
 						return sorted(list(owners))
 		return sorted(list(owners))
+
+	def get_states_owned_by_country(self, tag):
+		"""Returns True if the given country tag owns at least one state (create_state) in history/states."""
+		clean_tag = tag.upper().replace("C:", "").strip()
+		if not clean_tag:
+			return False
+
+		paths = []
+		if self.mod_path:
+			paths.append(os.path.join(self.mod_path, "common/history/states"))
+		if self.vanilla_path:
+			paths.append(os.path.join(self.vanilla_path, "game/common/history/states"))
+
+		pattern = re.compile(r"country\s*=\s*c:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
+
+		for p in paths:
+			if not os.path.exists(p):
+				continue
+			for root, _, files in os.walk(p):
+				for file in files:
+					if not file.endswith(".txt"):
+						continue
+					try:
+						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+							content = f.read()
+					except:
+						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+							content = f.read()
+					if pattern.search(content):
+						return True
+		return False
 
 	def get_state_homelands(self, state_name):
 		"""Scans history/states for add_homeland lines."""
@@ -8670,7 +8782,8 @@ class StateManager:
 		else:
 			content += new_block
 
-		with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with open(target_path, 'w', encoding='utf-8-sig') as f:
+			f.write(content)
 		self.logic.log(f"Saved state geometry to {os.path.basename(target_path)}")
 
 	def validate_state(self, state_id):
@@ -9629,6 +9742,7 @@ class App(tk.Tk):
 				self.load_military_formations()
 			else:
 				messagebox.showerror("Error", "Could not delete formation.")
+
 	def _rgb_to_hex(self, rgb):
 		return f'#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}'
 
