@@ -1485,7 +1485,7 @@ class Vic3Logic:
 									# Rule 1: Building owned by a building in the same state.
 									# The country tags have already been swapped upstream — preserve the block exactly.
 									if (re.search(r"building\s*=\s*\{", ao_content) and
-											re.search(r'region\s*=\s*"?' + re.escape(state_name) + r'"?', ao_content, re.IGNORECASE)):
+											re.search(r'region\s*=\s*"?(?:s:)?' + re.escape(state_name) + r'"?', ao_content, re.IGNORECASE)):
 										new_inner_parts.append(cb_full)
 										inner_cursor = cb_e
 										last_inner_idx = cb_e
@@ -1758,25 +1758,28 @@ class Vic3Logic:
 					cursor = e
 				else: cursor = abs_start + 1
 
-			if old_range and new_range:
+			# Pops: just rename the tag — the game treats multiple region_state:TAG blocks
+			# for the same country as additive, so a simple rename is correct and safe.
+			# Buildings: merge the old block's content into the new block so ownership
+			# entries are consolidated under the new country's block.
+			if folder == "buildings" and old_range and new_range:
 				old_c = content[old_range[0]:old_range[1]]
 				fb = old_c.find('{')
-				inner = old_c[fb+1:-1]
+				inner = old_c[fb+1:-1].strip()
 				new_c = content[new_range[0]:new_range[1]]
 				lb = new_c.rfind('}')
-				new_c = new_c[:lb] + "\n" + inner + "\n" + new_c[lb:]
+				if inner:
+					new_c = new_c[:lb].rstrip() + "\n\t\t\t" + inner + "\n\t\t" + new_c[lb:]
 
 				new_c = re.sub(f"c:{re.escape(clean_old)}", f"c:{clean_new}", new_c, flags=re.IGNORECASE)
-
-				if folder == "buildings":
-					new_c = self.fix_building_ownership(new_c, clean_new, state_name, old_tag=clean_old)
+				new_c = self.fix_building_ownership(new_c, clean_new, state_name, old_tag=clean_old)
 
 				first = old_range if old_range[0] < new_range[0] else new_range
 				second = new_range if old_range[0] < new_range[0] else old_range
 				if first == old_range:
 					return content[:first[0]] + content[first[1]:second[0]] + new_c + content[second[1]:]
 				else:
-					return content[:first[0]] + new_c + content[first[1]:second[0]] + content[second[1]:]
+					return content[:first[0]] + new_c + content[second[1]:]
 
 			return self.sanitize_block_content(content, state_name, old_tag, new_tag, (folder=="buildings"))
 
@@ -2174,7 +2177,7 @@ class Vic3Logic:
 			existing_fm_insert = None
 			existing_fm_scope = None
 
-			if last_tag_pos != -1 and unit_buffer:
+			if last_tag_pos != -1:
 				tag_block_start, tag_block_end = self.find_block_content(file_content, last_tag_pos)
 				tag_inner = file_content[tag_block_start + 1 : tag_block_end - 1]
 				fi_cursor = 0
@@ -2196,8 +2199,8 @@ class Vic3Logic:
 			if unit_buffer:
 				if existing_fm_insert is not None:
 					self.log(f"      [MERGE] Merging {len(unit_buffer)} unit(s) into existing {f_type} for c:{new_tag}")
-					units_text = "\n\t\t# Transferred Units\n\t\t" + "\n\t\t".join(unit_buffer)
-					file_content = file_content[:existing_fm_insert] + units_text + "\n\t" + file_content[existing_fm_insert:]
+					units_text = "\n\t\t\t# Transferred Units\n\t\t\t" + "\n\t\t\t".join(unit_buffer)
+					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
 				else:
 					self.log(f"      [CREATE] Creating {f_type} formation for c:{new_tag}")
 					clean_region_str = target_region.strip()
