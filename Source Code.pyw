@@ -1830,6 +1830,9 @@ class Vic3Logic:
 		files_modified = False
 		stolen_units_army = []
 		stolen_units_fleet = []
+		stolen_generals_army = []
+		stolen_generals_fleet = []
+		seen_gen_scopes = set()
 		current_search_idx = 0
 		processed_file_parts = []
 		last_idx = 0
@@ -1939,6 +1942,7 @@ class Vic3Logic:
 						if hq_val == clean_region_arg:
 							formation_in_scope = True
 
+					units_stolen_this_formation = False
 					self.log(f"[MIL] -> Checking formation '{form_name}'")
 
 					while f_cursor < len(f_body):
@@ -1997,12 +2001,49 @@ class Vic3Logic:
 
 							self.log(f"[MIL] Removed combat_unit from {form_name} formation.")
 							files_modified = True
+							units_stolen_this_formation = True
 						else:
 							new_f_body_parts.append(unit_block)
 
 						f_cursor = u_end
 
 					rebuilt_formation_body = "".join(new_f_body_parts)
+
+					# --- General duplication: copy generals attached to this formation ---
+					if units_stolen_this_formation:
+						save_scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", f_body)
+						if save_scope_m:
+							formation_scope = save_scope_m.group(1)
+							gen_link_pat = re.compile(
+								r"scope:([A-Za-z0-9_]+)\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:"
+								+ re.escape(formation_scope) + r"\b[^}]*\}",
+								re.IGNORECASE | re.DOTALL
+							)
+							for gen_link_m in gen_link_pat.finditer(inner_body):
+								gen_scope = gen_link_m.group(1)
+								if gen_scope in seen_gen_scopes:
+									continue
+								seen_gen_scopes.add(gen_scope)
+								cc_cursor = 0
+								while True:
+									cc_m = re.search(r"create_character\s*=\s*\{", inner_body[cc_cursor:], re.IGNORECASE)
+									if not cc_m: break
+									cc_abs = cc_cursor + cc_m.start()
+									cc_s, cc_e = self.find_block_content(inner_body, cc_cursor + cc_m.end() - 1)
+									if cc_s is None: break
+									char_block = inner_body[cc_abs:cc_e]
+									if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b", char_block):
+										new_scope = f"{gen_scope}_{new_tag.lower()}"
+										copied_block = re.sub(
+											r"save_scope_as\s*=\s*[A-Za-z0-9_]+",
+											f"save_scope_as = {new_scope}",
+											char_block
+										)
+										if is_army: stolen_generals_army.append((copied_block, gen_scope, new_scope))
+										elif is_fleet: stolen_generals_fleet.append((copied_block, gen_scope, new_scope))
+										self.log(f"      [GEN] Duplicating general scope:{gen_scope} -> scope:{new_scope} for c:{new_tag}")
+										break
+									cc_cursor = cc_e
 
 					# Check if formation is empty
 					if "combat_unit" not in rebuilt_formation_body:
@@ -2062,66 +2103,119 @@ class Vic3Logic:
 				f"\n}}"
 			)
 
-		def inject_new_formation(file_content, unit_buffer, f_type):
-			if not unit_buffer:
+		def inject_new_formation(file_content, unit_buffer, f_type, general_buffer=None):
+			if not unit_buffer and not general_buffer:
 				return file_content
-			# Use dest_hq_region if provided, else use original region (which may be invalid if country left it)
-			# If dest_hq_region is None (explicitly passed as None), it means "Delete/Disband"
+			if general_buffer is None:
+				general_buffer = []
 
+			# Use dest_hq_region if provided, else use original region
 			target_region = dest_hq_region if dest_hq_region else region
 
-			# If target_region is None/Empty, we cannot create formation. Units are effectively deleted.
-			if not target_region:
+			if not target_region and unit_buffer:
 				self.log(f"      [WARN] No valid HQ for {new_tag}. Units disbanded.", 'warn')
 				return file_content
 
-			clean_region_str = target_region.strip()	# todo: merge into existing hq army if one exists
-			if not clean_region_str.startswith("sr:") and "region_" in clean_region_str:
-				hq_region_val = f"sr:{clean_region_str}"
-			elif not clean_region_str.startswith("sr:") and "region_" not in clean_region_str:
-				hq_region_val = f"sr:{clean_region_str}"
-			else:
-				hq_region_val = clean_region_str
-			immersive_name = self.generate_immersive_name(clean_region_str, f_type)
-			unit_str = "\n\t\t" + "\n\t\t".join(unit_buffer)
-			print(unit_str)	# todo: unit_buffer check
-			block_str = (
-				f"\n\tcreate_military_formation = {{"
-				f"\n\t\tname = {immersive_name}"
-				f"\n\t\ttype = {f_type}"
-				f"\n\t\thq_region = {hq_region_val}"
-				f"\n\t\t# Transferred Units"
-				f"{unit_str}"
-				f"\n\t}}"
-			)
+			# Find last c:{new_tag} block
 			last_tag_pos = -1
 			curr = 0
-
 			while True:
 				ns, ne = self.get_block_range_safe(file_content, f"c:{new_tag}", curr)
-				if ns is None:
-					break
+				if ns is None: break
 				last_tag_pos = ns
 				curr = ne
-			if last_tag_pos != -1:
-				_, end_brace = self.find_block_content(file_content, last_tag_pos)
-				insert_pos = end_brace - 1
-				return file_content[:insert_pos] + "\n" + block_str + "\n" + file_content[insert_pos:]	# todo
-			else:
-				# NEW LOGIC: Check for MILITARY_FORMATIONS wrapper to insert inside it
-				mf_start, mf_end = self.get_block_range_safe(file_content, "MILITARY_FORMATIONS")
-				if mf_start is not None:
-					# Insert before the last brace of the wrapper
-					insert_pos = mf_end - 1
-					return file_content[:insert_pos] + f"\n\tc:{new_tag} ?= {{\n{block_str}\n\t}}\n" + file_content[insert_pos:]	# todo
+
+			# --- Try to merge units into an existing formation of the same type ---
+			existing_fm_insert = None
+			existing_fm_scope = None
+
+			if last_tag_pos != -1 and unit_buffer:
+				tag_block_start, tag_block_end = self.find_block_content(file_content, last_tag_pos)
+				tag_inner = file_content[tag_block_start + 1 : tag_block_end - 1]
+				fi_cursor = 0
+				while True:
+					fi_m = re.search(r"create_military_formation\s*=\s*\{", tag_inner[fi_cursor:])
+					if not fi_m: break
+					fi_abs = fi_cursor + fi_m.start()
+					fi_s, fi_e = self.find_block_content(tag_inner, fi_cursor + fi_m.end() - 1)
+					if fi_s is None: break
+					fi_block = tag_inner[fi_abs:fi_e]
+					type_m = re.search(r"\btype\s*=\s*(\w+)", fi_block)
+					if type_m and type_m.group(1).lower() == f_type.lower():
+						existing_fm_insert = tag_block_start + 1 + fi_e - 1
+						scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_block)
+						if scope_m:
+							existing_fm_scope = scope_m.group(1)
+					fi_cursor = fi_e
+
+			if unit_buffer:
+				if existing_fm_insert is not None:
+					self.log(f"      [MERGE] Merging {len(unit_buffer)} unit(s) into existing {f_type} for c:{new_tag}")
+					units_text = "\n\t\t# Transferred Units\n\t\t" + "\n\t\t".join(unit_buffer)
+					file_content = file_content[:existing_fm_insert] + units_text + "\n\t" + file_content[existing_fm_insert:]
 				else:
-					return file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"	# todo
-		if stolen_units_army:
-			self.log(f"      [CREATE] Creating Army for {new_tag}")
-			new_file_content = inject_new_formation(new_file_content, stolen_units_army, "army")
-		if stolen_units_fleet:
-			self.log(f"      [CREATE] Creating Fleet for {new_tag}")
-			new_file_content = inject_new_formation(new_file_content, stolen_units_fleet, "fleet")
+					self.log(f"      [CREATE] Creating {f_type} formation for c:{new_tag}")
+					clean_region_str = target_region.strip()
+					if not clean_region_str.startswith("sr:"):
+						hq_region_val = f"sr:{clean_region_str}"
+					else:
+						hq_region_val = clean_region_str
+					immersive_name = self.generate_immersive_name(clean_region_str, f_type)
+					new_fm_scope = f"auto_{new_tag.lower()}_{f_type}"
+					unit_str = "\n\t\t" + "\n\t\t".join(unit_buffer)
+					print(unit_str)	# todo: unit_buffer check
+					block_str = (
+						f"\n\tcreate_military_formation = {{"
+						f"\n\t\tname = {immersive_name}"
+						f"\n\t\ttype = {f_type}"
+						f"\n\t\thq_region = {hq_region_val}"
+						f"\n\t\tsave_scope_as = {new_fm_scope}"
+						f"\n\t\t# Transferred Units"
+						f"{unit_str}"
+						f"\n\t}}"
+					)
+					if last_tag_pos != -1:
+						_, end_brace = self.find_block_content(file_content, last_tag_pos)
+						insert_pos = end_brace - 1
+						file_content = file_content[:insert_pos] + "\n" + block_str + "\n" + file_content[insert_pos:]
+					else:
+						mf_start, mf_end = self.get_block_range_safe(file_content, "MILITARY_FORMATIONS")
+						if mf_start is not None:
+							insert_pos = mf_end - 1
+							file_content = file_content[:insert_pos] + f"\n\tc:{new_tag} ?= {{\n{block_str}\n\t}}\n" + file_content[insert_pos:]
+						else:
+							file_content = file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"
+					existing_fm_scope = new_fm_scope
+
+			# --- Inject duplicated generals into the destination country block ---
+			if general_buffer:
+				last_tag_pos2 = -1
+				curr2 = 0
+				while True:
+					ns2, ne2 = self.get_block_range_safe(file_content, f"c:{new_tag}", curr2)
+					if ns2 is None: break
+					last_tag_pos2 = ns2
+					curr2 = ne2
+				if last_tag_pos2 != -1:
+					_, end_brace2 = self.find_block_content(file_content, last_tag_pos2)
+					insert_pos2 = end_brace2 - 1
+					gen_str = ""
+					for char_block, orig_scope, new_scope in general_buffer:
+						gen_str += f"\n\t{char_block}"
+						if existing_fm_scope:
+							gen_str += (
+								f"\n\tscope:{new_scope} = {{"
+								f"\n\t\ttransfer_to_formation = scope:{existing_fm_scope}"
+								f"\n\t}}"
+							)
+					file_content = file_content[:insert_pos2] + gen_str + "\n" + file_content[insert_pos2:]
+
+			return file_content
+
+		if stolen_units_army or stolen_generals_army:
+			new_file_content = inject_new_formation(new_file_content, stolen_units_army, "army", stolen_generals_army)
+		if stolen_units_fleet or stolen_generals_fleet:
+			new_file_content = inject_new_formation(new_file_content, stolen_units_fleet, "fleet", stolen_generals_fleet)
 		with open(filepath, 'w', encoding='utf-8-sig') as f:
 			f.write(new_file_content)
 		return True
@@ -4538,17 +4632,23 @@ class Vic3Logic:
 
 														# Check if region is bad
 														if bad_region_re.search(entry_inner):
-															# Extract Level
-															lvl = 1
-															lm = re.search(r"levels?\s*=\s*(\d+)", entry_inner)
-															if lm:
-																lvl = int(lm.group(1))
-
-															# Generate new valid entry (Nationalize to Land Owner)
-															new_entry = self.get_ownership_content(b_type, land_owner_tag, lvl, local_state)
-															new_ao_parts.append(new_entry)	# todo: important point for possible rework
-															ao_modified = True
-															file_modified = True
+															# Only fix same-state ownership (region == local_state with a stale name).
+															# Cross-state ownership (region is a different state) is valid — preserve it.
+															region_m = re.search(r'region\s*=\s*"?([A-Za-z0-9_]+)"?', entry_inner)
+															entry_region = region_m.group(1) if region_m else None
+															if entry_region and entry_region.upper() == local_state.upper():
+																# Same-state stale reference — update the region value
+																new_entry = re.sub(
+																	r'region\s*=\s*"[^"]*"',
+																	f'region = "{local_state}"',
+																	entry_block
+																)
+																new_ao_parts.append(new_entry)
+																ao_modified = True
+																file_modified = True
+															else:
+																# Cross-state ownership — do not modify
+																new_ao_parts.append(entry_block)
 														else:
 															new_ao_parts.append(entry_block)
 
@@ -4561,9 +4661,9 @@ class Vic3Logic:
 													new_ao_block = (
 														"\n\t\t\t\tadd_ownership = {"
 														# "\n\t\t\t\t\t# made with clean_transferred_state_references ao_modified"
-													) + "".join(new_ao_parts).strip() + "\n\t\t\t\t}"
-													new_b_inner = b_inner[:am.start()] + new_ao_block + b_inner[as_e:]
-													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner + "\n\t\t\t}"
+													) + "".join(new_ao_parts) + "\n\t\t\t\t}"
+													new_b_inner = b_inner[:am.start()].rstrip() + new_ao_block + b_inner[as_e:]
+													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner.rstrip() + "\n\t\t\t}"
 													new_rs_parts.append(new_b_full)
 												else:
 													new_rs_parts.append(b_full)
