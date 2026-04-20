@@ -1491,6 +1491,51 @@ class Vic3Logic:
 										last_inner_idx = cb_e
 										continue
 
+									# Rule 2 early check: company = { ... } ownership is not parsed by
+									# consolidate_ownership, so intercept it here before consolidation.
+									if re.search(r"\bcompany\s*=\s*\{", ao_content):
+										co_m = re.search(r"company\s*=\s*\{[^}]*?country\s*=\s*c:([A-Za-z0-9_]+)", ao_content, re.DOTALL)
+										company_country = co_m.group(1).upper() if co_m else None
+										if company_country and old_tag and company_country.upper() == owner_tag.upper():
+											# Company country was swapped upstream (old_tag -> owner_tag)
+											if self.get_states_owned_by_country(old_tag):
+												# old_tag still owns states -> restore company ownership (un-swap)
+												fixed_ao = re.sub(
+													r"(company\s*=\s*\{[^}]*?country\s*=\s*c:)" + re.escape(owner_tag),
+													r"\g<1>" + old_tag,
+													ao_content, flags=re.IGNORECASE | re.DOTALL
+												)
+												new_ao_block = (
+													f"\n\t\t\t\tadd_ownership = {{"
+													f"{fixed_ao}"
+													f"\n\t\t\t\t}}"
+												)
+											else:
+												# old_tag has no states left -> company disbanded, rewrite to self-ownership
+												total_levels_co = sum(int(x) for x in re.findall(r"levels\s*=\s*(\d+)", ao_content)) or 1
+												new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
+												ownership_block = self.get_ownership_block(b_type, owner_tag, total_levels_co, state_name)
+												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
+												new_inner_parts.append(new_cb_block)
+												inner_modified = True
+												inner_cursor = cb_e
+												last_inner_idx = cb_e
+												continue
+										else:
+											# Third-country company or old_tag unknown -> preserve as-is
+											new_ao_block = (
+												f"\n\t\t\t\tadd_ownership = {{"
+												f"{ao_content}"
+												f"\n\t\t\t\t}}"
+											)
+										new_cb_inner = cb_inner[:ao_m.start()].rstrip() + new_ao_block + cb_inner[ao_e:]
+										new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner.rstrip() + "\n\t\t\t}"
+										new_inner_parts.append(new_cb_block)
+										inner_modified = True
+										inner_cursor = cb_e
+										last_inner_idx = cb_e
+										continue
+
 									# CONSOLIDATE FIRST: Merge duplicates caused by replacements
 									consolidated = self.consolidate_ownership(ao_content)
 
