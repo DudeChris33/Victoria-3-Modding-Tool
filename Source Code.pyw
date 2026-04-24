@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import shutil
 import traceback
@@ -23,9 +23,42 @@ except ImportError:
 # =============================================================================
 
 class Vic3Logic:
-	CAT_A_STATE = ["building_government_administration", "building_construction_sector", "building_university", "building_barrack", "building_port", "building_conscription_center"]
-	CAT_B_SELFO = ["building_iron_mine", "building_coal_mine", "building_logging_camp", "building_fishing_wharf", "building_whaling_station", "building_textile_mill"]
-	CAT_C_RURAL = ["building_wheat_farm", "building_rye_farm", "building_rice_farm", "building_maize_farm", "building_millet_farm", "building_livestock_ranch", "building_rubber_plantation", "building_cotton_plantation", "building_coffee_plantation", "building_tea_plantation", "building_tobacco_plantation", "building_sugar_plantation", "building_vineyard", "building_fruit_plantation", "building_silk_plantation", "building_dye_plantation", "building_opium_plantation"]
+	# State/government buildings — no ownership_type in game files; always get state ownership.
+	CAT_A_STATE = [
+		"building_government_administration", "building_construction_sector",
+		"building_university",
+		"building_barrack", "building_conscription_center", "building_naval_base",
+		"building_port", "building_railway", "building_power_plant",
+	]
+	CAT_B_SELF = [
+		# Mines
+		"building_coal_mine", "building_iron_mine", "building_lead_mine", "building_sulfur_mine",
+		"building_gold_mine",
+		# Misc resources / extraction
+		"building_logging_camp", "building_rubber_plantation", "building_fishing_wharf",
+		"building_whaling_station", "building_oil_rig",
+		# Urban services
+		"building_art_academy",
+	]
+	# Agricultural / plantation buildings — ownership_type = self, generate rural (manor house) ownership.
+	CAT_C_RURAL = [
+		# Staple farms
+		"building_rye_farm", "building_wheat_farm", "building_rice_farm", "building_maize_farm",
+		"building_millet_farm", "building_livestock_ranch", "building_vineyard",
+		# Plantations
+		"building_coffee_plantation", "building_cotton_plantation", "building_dye_plantation",
+		"building_opium_plantation", "building_tea_plantation", "building_tobacco_plantation",
+		"building_sugar_plantation", "building_banana_plantation", "building_silk_plantation",
+	]
+	# Private industrial/commercial buildings — ownership_type = self, generate urban (financial district) ownership.
+	CAT_D_URBAN = [
+		# Industry
+		"building_food_industry", "building_textile_mill", "building_furniture_manufactory", "building_glassworks",
+		"building_tooling_workshop", "building_paper_mill", "building_chemical_plant", "building_explosives_factory",
+		"building_synthetics_plant", "building_steel_mill", "building_motor_industry", "building_shipyard",
+		"building_military_shipyard", "building_automotive_industry", "building_electrics_industry",
+		"building_arms_industry", "building_artillery_foundry", "building_munition_plant",
+	]
 
 	def __init__(self, log_callback):
 		self.log = log_callback
@@ -1250,15 +1283,13 @@ class Vic3Logic:
 		if building_type in self.CAT_A_STATE or economic_law == "law_command_economy":
 			return (
 				f"\n\t\t\t\t\tcountry = {{"
-				# f"\n\t\t\t\t\t\t# get_ownership_content branch 1"
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t}}"
 			)
-		elif building_type in self.CAT_B_SELFO:
+		elif building_type in self.CAT_B_SELF:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				# f"\n\t\t\t\t\t\t# get_ownership_content branch 2"
 				f"\n\t\t\t\t\t\ttype = \"{building_type}\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1268,17 +1299,15 @@ class Vic3Logic:
 		elif building_type in self.CAT_C_RURAL or economic_law in {"law_traditionalism", "law_agrarianism"}:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				# f"\n\t\t\t\t\t\t# get_ownership_content branch 3"
 				f"\n\t\t\t\t\t\ttype = \"building_manor_house\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t\tregion = \"{clean_state}\""
 				f"\n\t\t\t\t\t}}"
 			)
-		elif economic_law in {"law_interventionism", "law_laissez_faire"}:
+		elif building_type in self.CAT_D_URBAN or economic_law in {"law_interventionism", "law_laissez_faire"}:
 			return (
 				f"\n\t\t\t\t\tbuilding = {{"
-				# f"\n\t\t\t\t\t\t# get_ownership_content branch 4"
 				f"\n\t\t\t\t\t\ttype = \"building_financial_district\""
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
@@ -1288,7 +1317,6 @@ class Vic3Logic:
 		else:
 			return (
 				f"\n\t\t\t\t\tcountry = {{"
-				# f"\n\t\t\t\t\t\t# get_ownership_content branch 5"
 				f"\n\t\t\t\t\t\tcountry = \"c:{clean_owner}\""
 				f"\n\t\t\t\t\t\tlevels = {level}"
 				f"\n\t\t\t\t\t}}"
@@ -1312,8 +1340,7 @@ class Vic3Logic:
 		inner = self.get_ownership_content(building_type, owner_tag, level, state_name)
 		return (
 			f"\n\t\t\t\tadd_ownership = {{"
-			f"\n\t\t\t\t\t# made with get_ownership_block"
-			f"{inner}"
+			f"{inner.rstrip()}"
 			f"\n\t\t\t\t}}"
 		)
 
@@ -1398,7 +1425,7 @@ class Vic3Logic:
 
 		return "\n".join(lines)
 
-	def fix_building_ownership(self, block_content, owner_tag, state_name, old_tag=None):
+	def fix_building_ownership(self, block_content, owner_tag, state_name, old_tag=None, full_annex=False):
 		"""Ensures all create_building blocks in the target region have explicit ownership."""
 
 		# Find region_state block for owner_tag
@@ -1451,6 +1478,24 @@ class Vic3Logic:
 
 						# SKIP Subsistence Farms and other auto-managed buildings to prevent crashes
 						if b_type in ["building_subsistence_farms", "building_urban_center", "building_trade_center"]:
+							# Preserve ownership as-is but enforce canonical field order:
+							# activate_production_methods must come after reserves (and after add_ownership)
+							_apm = re.search(r"\bactivate_production_methods\s*=\s*\{", cb_inner)
+							if _apm:
+								_apm_s, _apm_e = self.find_block_content(cb_inner, _apm.end() - 1)
+								if _apm_s and cb_inner[_apm_e:].strip():
+									# activate_production_methods is not last — move it to the end
+									_apm_text = cb_inner[_apm.start():_apm_e]
+									_new_inner = (cb_inner[:_apm.start()].rstrip()
+										+ cb_inner[_apm_e:].rstrip()
+										+ "\n\t\t\t\t" + _apm_text.strip())
+									new_inner_parts.append(
+										inner_region[cb_abs_start:cb_s+1] + _new_inner + "\n\t\t\t}"
+									)
+									inner_modified = True
+									inner_cursor = cb_e
+									last_inner_idx = cb_e
+									continue
 							new_inner_parts.append(cb_full)
 							inner_cursor = cb_e
 							last_inner_idx = cb_e
@@ -1462,6 +1507,14 @@ class Vic3Logic:
 						level_val = int(level_match.group(1)) if level_match else 1
 
 						if not has_ownership:
+							# Only add ownership to buildings in known ownership categories.
+							# Monuments, unique buildings, and other unknown types are left as-is.
+							known_type = (b_type in self.CAT_A_STATE or b_type in self.CAT_B_SELF or b_type in self.CAT_C_RURAL or b_type in self.CAT_D_URBAN)
+							if not known_type:
+								new_inner_parts.append(cb_full)
+								inner_cursor = cb_e
+								last_inner_idx = cb_e
+								continue
 							# Must fix
 							new_cb_inner = cb_inner
 							if level_match:
@@ -1481,6 +1534,38 @@ class Vic3Logic:
 								ao_s, ao_e = self.find_block_content(cb_inner, ao_m.end()-1)
 								if ao_s:
 									ao_content = cb_inner[ao_s+1:ao_e-1]
+
+									# Cross-state building ownership: region points to a DIFFERENT state.
+									# The upstream c:old_tag -> c:new_tag swap was wrong for this entry -- revert it.
+									if re.search(r"\bbuilding\s*=\s*\{", ao_content):
+										_rgn_m = re.search(r'region\s*=\s*"?(?:s:)?([A-Za-z0-9_]+)"?', ao_content, re.IGNORECASE)
+										_ao_region = _rgn_m.group(1) if _rgn_m else None
+										if _ao_region and _ao_region.upper() != state_name.upper():
+											# Cross-state: preserve verbatim.
+											# For state transfers (not full annex), revert the upstream c:old->c:new swap
+											# since the entity in the cross-state region still belongs to old_tag.
+											# For full annexations, old_tag is absorbed so all its assets pass to
+											# the annexing country -- no revert needed.
+											fixed_ao = ao_content
+											if old_tag and not full_annex:
+												clean_old_rev = old_tag.replace("c:", "").strip()
+												fixed_ao = re.sub(
+													f"c:{re.escape(owner_tag)}",
+													f"c:{clean_old_rev}",
+													ao_content, flags=re.IGNORECASE
+												)
+											new_ao_block = (
+												f"\n\t\t\t\tadd_ownership = {{"
+												f"{fixed_ao}"
+												f"\n\t\t\t\t}}"
+											)
+											new_cb_inner = cb_inner[:ao_m.start()].rstrip() + new_ao_block + cb_inner[ao_e:]
+											new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner.rstrip() + "\n\t\t\t}"
+											new_inner_parts.append(new_cb_block)
+											inner_modified = True
+											inner_cursor = cb_e
+											last_inner_idx = cb_e
+											continue
 
 									# Rule 1: Building owned by a building in the same state.
 									# The country tags have already been swapped upstream — preserve the block exactly.
@@ -1507,7 +1592,7 @@ class Vic3Logic:
 												)
 												new_ao_block = (
 													f"\n\t\t\t\tadd_ownership = {{"
-													f"{fixed_ao}"
+													f"{fixed_ao.rstrip()}"
 													f"\n\t\t\t\t}}"
 												)
 											else:
@@ -1525,7 +1610,7 @@ class Vic3Logic:
 											# Third-country company or old_tag unknown -> preserve as-is
 											new_ao_block = (
 												f"\n\t\t\t\tadd_ownership = {{"
-												f"{ao_content}"
+												f"{ao_content.rstrip()}"
 												f"\n\t\t\t\t}}"
 											)
 										new_cb_inner = cb_inner[:ao_m.start()].rstrip() + new_ao_block + cb_inner[ao_e:]
@@ -1574,7 +1659,7 @@ class Vic3Logic:
 													)
 													new_ao_block = (
 														f"\n\t\t\t\tadd_ownership = {{"
-														f"{fixed_consolidated}"
+														f"{fixed_consolidated.rstrip()}"
 														f"\n\t\t\t\t}}"
 													)
 													new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
@@ -1591,7 +1676,7 @@ class Vic3Logic:
 												# Company belongs to a third country (not old_tag) -> preserve as-is
 												new_ao_block = (
 													f"\n\t\t\t\tadd_ownership = {{"
-													f"{consolidated}"
+													f"{consolidated.rstrip()}"
 													f"\n\t\t\t\t}}"
 												)
 												new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
@@ -1618,9 +1703,8 @@ class Vic3Logic:
 												inner_cursor = cb_e
 												last_inner_idx = cb_e
 												continue
-											else:
-												# Building owned by the state owner — changes with state ownership
-												should_rewrite = True
+											# else: actual_tag == owner_tag — upstream swap already updated the tag;
+											# fall through to inject consolidated content as-is (format preserved).
 
 									if should_rewrite:
 										# Regenerate completely
@@ -1634,7 +1718,7 @@ class Vic3Logic:
 										# Just inject the consolidated content if it changed
 										new_ao_block = (
 											f"\n\t\t\t\tadd_ownership = {{"
-											f"{consolidated}"
+											f"{consolidated.rstrip()}"
 											f"\n\t\t\t\t}}"
 										)
 										
@@ -1679,9 +1763,7 @@ class Vic3Logic:
 		content = re.sub(r"region_state:\s*(c:)?" + re.escape(old_tag), f"region_state:{new_tag}", content, flags=re.IGNORECASE)
 		content = re.sub(f"c:{re.escape(old_tag)}", f"c:{new_tag}", content, flags=re.IGNORECASE)
 		if is_building_file:
-			target_region_str = f'region="{state_str}"'
-			content = re.sub(r'region\s*=\s*"(s:)?STATE_[A-Za-z0-9_]+"', target_region_str, content, flags=re.IGNORECASE)
-			# Fix ownership
+			# Fix ownership contextually; no blanket region substitution (would clobber cross-state refs)
 			clean_new = new_tag.replace("c:", "").strip()
 			content = self.fix_building_ownership(content, clean_new, state_str, old_tag=old_tag)
 		return content
@@ -1744,44 +1826,9 @@ class Vic3Logic:
 			return self.sanitize_block_content(content, state_name, old_tag, new_tag, False)
 
 		else:
-			old_range, new_range = None, None
-			cursor = 0
-			while True:
-				m = re.search(r"region_state:([A-Za-z0-9_]+)\s*=\s*\{", content[cursor:], re.IGNORECASE)
-				if not m: break
-				tag = m.group(1)
-				abs_start = cursor + m.start()
-				s, e = self.find_block_content(content, cursor + m.end() - 1)
-				if s:
-					if tag.upper() == clean_old.upper(): old_range = (abs_start, e)
-					elif tag.upper() == clean_new.upper(): new_range = (abs_start, e)
-					cursor = e
-				else: cursor = abs_start + 1
-
-			# Pops: just rename the tag — the game treats multiple region_state:TAG blocks
-			# for the same country as additive, so a simple rename is correct and safe.
-			# Buildings: merge the old block's content into the new block so ownership
-			# entries are consolidated under the new country's block.
-			if folder == "buildings" and old_range and new_range:
-				old_c = content[old_range[0]:old_range[1]]
-				fb = old_c.find('{')
-				inner = old_c[fb+1:-1].strip()
-				new_c = content[new_range[0]:new_range[1]]
-				lb = new_c.rfind('}')
-				if inner:
-					new_c = new_c[:lb].rstrip() + "\n\t\t\t" + inner + "\n\t\t" + new_c[lb:]
-
-				new_c = re.sub(f"c:{re.escape(clean_old)}", f"c:{clean_new}", new_c, flags=re.IGNORECASE)
-				new_c = self.fix_building_ownership(new_c, clean_new, state_name, old_tag=clean_old)
-
-				first = old_range if old_range[0] < new_range[0] else new_range
-				second = new_range if old_range[0] < new_range[0] else old_range
-				if first == old_range:
-					return content[:first[0]] + content[first[1]:second[0]] + new_c + content[second[1]:]
-				else:
-					return content[:first[0]] + new_c + content[second[1]:]
-
-			return self.sanitize_block_content(content, state_name, old_tag, new_tag, (folder=="buildings"))
+			# Vic3 treats multiple region_state:TAG blocks for the same country as additive
+			# at load time, so renaming the tag is sufficient — no merging needed.
+			return self.sanitize_block_content(content, state_name, old_tag, new_tag, (folder == "buildings"))
 
 	def _detect_owners(self, block_content, folder):
 		owners = set()
@@ -1859,8 +1906,8 @@ class Vic3Logic:
 
 	def clean_unit_string(self, unit_block):
 		cleaned = re.sub(r"id\s*=\s*\d+", "", unit_block, flags=re.IGNORECASE)
-		cleaned = "\n".join([line for line in cleaned.split('\n') if line.strip()])
-		return cleaned
+		lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
+		return '\n'.join(lines)
 
 	def generate_immersive_name(self, region_raw, f_type):
 		clean_name = region_raw.lower().replace("region_", "").replace("_", " ").title().strip()
@@ -1880,7 +1927,7 @@ class Vic3Logic:
 		stolen_units_fleet = []
 		stolen_generals_army = []
 		stolen_generals_fleet = []
-		seen_gen_scopes = set()
+		emptied_formation_scopes = {}
 		current_search_idx = 0
 		processed_file_parts = []
 		last_idx = 0
@@ -2057,46 +2104,15 @@ class Vic3Logic:
 
 					rebuilt_formation_body = "".join(new_f_body_parts)
 
-					# --- General duplication: copy generals attached to this formation ---
-					if units_stolen_this_formation:
-						save_scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", f_body)
-						if save_scope_m:
-							formation_scope = save_scope_m.group(1)
-							gen_link_pat = re.compile(
-								r"scope:([A-Za-z0-9_]+)\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:"
-								+ re.escape(formation_scope) + r"\b[^}]*\}",
-								re.IGNORECASE | re.DOTALL
-							)
-							for gen_link_m in gen_link_pat.finditer(inner_body):
-								gen_scope = gen_link_m.group(1)
-								if gen_scope in seen_gen_scopes:
-									continue
-								seen_gen_scopes.add(gen_scope)
-								cc_cursor = 0
-								while True:
-									cc_m = re.search(r"create_character\s*=\s*\{", inner_body[cc_cursor:], re.IGNORECASE)
-									if not cc_m: break
-									cc_abs = cc_cursor + cc_m.start()
-									cc_s, cc_e = self.find_block_content(inner_body, cc_cursor + cc_m.end() - 1)
-									if cc_s is None: break
-									char_block = inner_body[cc_abs:cc_e]
-									if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b", char_block):
-										new_scope = f"{gen_scope}_{new_tag.lower()}"
-										copied_block = re.sub(
-											r"save_scope_as\s*=\s*[A-Za-z0-9_]+",
-											f"save_scope_as = {new_scope}",
-											char_block
-										)
-										if is_army: stolen_generals_army.append((copied_block, gen_scope, new_scope))
-										elif is_fleet: stolen_generals_fleet.append((copied_block, gen_scope, new_scope))
-										self.log(f"      [GEN] Duplicating general scope:{gen_scope} -> scope:{new_scope} for c:{new_tag}")
-										break
-									cc_cursor = cc_e
-
 					# Check if formation is empty
 					if "combat_unit" not in rebuilt_formation_body:
 						self.log(f"      [DELETE] Formation {form_name} became empty. Deleted.")
 						files_modified = True
+						# Track scope for general relocation (rules 2 & 3)
+						if units_stolen_this_formation:
+							save_scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", f_body)
+							if save_scope_m:
+								emptied_formation_scopes[save_scope_m.group(1)] = "army" if is_army else "fleet"
 					else:
 						# Relocation Logic: If country abandoned the region (force_move), but formation remains (has units elsewhere),
 						# we must move the HQ.
@@ -2129,9 +2145,99 @@ class Vic3Logic:
 
 				cursor = f_end
 
+			# --- General relocation (rules 2 & 3) ---
+			if emptied_formation_scopes:
+				inner_reconstructed = "".join(new_inner_parts)
+
+				# Count generals currently linked to each formation (from original inner_body)
+				gen_count = {}
+				for fm_sc in re.findall(r"transfer_to_formation\s*=\s*scope:([A-Za-z0-9_]+)", inner_body, re.IGNORECASE):
+					gen_count[fm_sc] = gen_count.get(fm_sc, 0) + 1
+
+				# Find available (non-emptied, still has combat_unit) formations in reconstructed block
+				available = {}  # scope -> type
+				fi_c = 0
+				while True:
+					fi_m2 = re.search(r"create_military_formation\s*=\s*\{", inner_reconstructed[fi_c:])
+					if not fi_m2: break
+					fi_abs2 = fi_c + fi_m2.start()
+					fi_s2, fi_e2 = self.find_block_content(inner_reconstructed, fi_c + fi_m2.end() - 1)
+					if fi_s2 is None: break
+					fi_blk2 = inner_reconstructed[fi_abs2:fi_e2]
+					sc_m2 = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_blk2)
+					ty_m2 = re.search(r"\btype\s*=\s*(\w+)", fi_blk2)
+					if sc_m2 and ty_m2 and "combat_unit" in fi_blk2:
+						sc2 = sc_m2.group(1)
+						if sc2 not in emptied_formation_scopes:
+							available[sc2] = ty_m2.group(1).lower()
+					fi_c = fi_e2
+
+				for emptied_scope, emptied_type in emptied_formation_scopes.items():
+					gen_link_pat = re.compile(
+						r"scope:([A-Za-z0-9_]+)\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:"
+						+ re.escape(emptied_scope) + r"\b[^}]*\}",
+						re.IGNORECASE | re.DOTALL
+					)
+					for glm in gen_link_pat.finditer(inner_body):
+						gen_scope = glm.group(1)
+
+						# Rule 2: another formation of same type with < 4 generals
+						target_scope = None
+						for av_sc, av_type in available.items():
+							if av_type == emptied_type and gen_count.get(av_sc, 0) < 4:
+								target_scope = av_sc
+								gen_count[target_scope] = gen_count.get(target_scope, 0) + 1
+								break
+
+						if target_scope:
+							inner_reconstructed = re.sub(
+								r"(scope:" + re.escape(gen_scope) + r"\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:)"
+								+ re.escape(emptied_scope) + r"\b",
+								r"\g<1>" + target_scope,
+								inner_reconstructed, count=1, flags=re.IGNORECASE | re.DOTALL
+							)
+							self.log(f"      [GEN] scope:{gen_scope} -> scope:{target_scope} (same country, rule 2)")
+						else:
+							# Rule 3: general follows troops to new country
+							cc_c = 0
+							while True:
+								cc_m2 = re.search(r"create_character\s*=\s*\{", inner_body[cc_c:], re.IGNORECASE)
+								if not cc_m2: break
+								cc_abs2 = cc_c + cc_m2.start()
+								cc_s2, cc_e2 = self.find_block_content(inner_body, cc_c + cc_m2.end() - 1)
+								if cc_s2 is None: break
+								char_block = inner_body[cc_abs2:cc_e2]
+								if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b", char_block):
+									if emptied_type == "army": stolen_generals_army.append((char_block, gen_scope))
+									else: stolen_generals_fleet.append((char_block, gen_scope))
+									# Remove create_character from reconstructed content
+									ir_c = 0
+									while True:
+										ir_m = re.search(r"create_character\s*=\s*\{", inner_reconstructed[ir_c:], re.IGNORECASE)
+										if not ir_m: break
+										ir_abs = ir_c + ir_m.start()
+										ir_s, ir_e = self.find_block_content(inner_reconstructed, ir_c + ir_m.end() - 1)
+										if ir_s is None: break
+										if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b", inner_reconstructed[ir_abs:ir_e]):
+											inner_reconstructed = inner_reconstructed[:ir_abs] + inner_reconstructed[ir_e:]
+											break
+										ir_c = ir_e
+									# Remove scope:gen = { transfer_to_formation = ... } link
+									sl_m = re.search(r"scope:" + re.escape(gen_scope) + r"\s*=\s*\{", inner_reconstructed, re.IGNORECASE)
+									if sl_m:
+										sl_s, sl_e = self.find_block_content(inner_reconstructed, sl_m.end() - 1)
+										if sl_s is not None:
+											inner_reconstructed = inner_reconstructed[:sl_m.start()] + inner_reconstructed[sl_e:]
+									self.log(f"      [GEN] scope:{gen_scope} follows troops to c:{new_tag} (rule 3)")
+									break
+								cc_c = cc_e2
+
+				new_inner_parts = [inner_reconstructed]
+				emptied_formation_scopes.clear()
+
 			processed_file_parts.append(header + "".join(new_inner_parts) + footer)
 			last_idx = c_end
-			current_search_idx = c_end 
+			current_search_idx = c_end
 		if not files_modified:
 			return False
 		new_file_content = "".join(processed_file_parts)
@@ -2157,70 +2263,96 @@ class Vic3Logic:
 			if general_buffer is None:
 				general_buffer = []
 
-			# Use dest_hq_region if provided, else use original region
+			# Fallback region (used when a unit has no resolvable strategic region)
 			target_region = dest_hq_region if dest_hq_region else region
 
-			if not target_region and unit_buffer:
-				self.log(f"      [WARN] No valid HQ for {new_tag}. Units disbanded.", 'warn')
-				return file_content
+			def indent_units(units, base):
+				t = '\t'
+				out = []
+				for u in units:
+					ul = u.split('\n')
+					for i, line in enumerate(ul):
+						if i == 0 or i == len(ul) - 1:
+							out.append(t * base + line)
+						else:
+							out.append(t * (base + 1) + line)
+				return '\n'.join(out)
 
-			# Find last c:{new_tag} block
-			last_tag_pos = -1
-			curr = 0
-			while True:
-				ns, ne = self.get_block_range_safe(file_content, f"c:{new_tag}", curr)
-				if ns is None: break
-				last_tag_pos = ns
-				curr = ne
-
-			# --- Try to merge units into an existing formation of the same type ---
-			existing_fm_insert = None
-			existing_fm_scope = None
-
-			if last_tag_pos != -1:
-				tag_block_start, tag_block_end = self.find_block_content(file_content, last_tag_pos)
-				tag_inner = file_content[tag_block_start + 1 : tag_block_end - 1]
-				fi_cursor = 0
-				while True:
-					fi_m = re.search(r"create_military_formation\s*=\s*\{", tag_inner[fi_cursor:])
-					if not fi_m: break
-					fi_abs = fi_cursor + fi_m.start()
-					fi_s, fi_e = self.find_block_content(tag_inner, fi_cursor + fi_m.end() - 1)
-					if fi_s is None: break
-					fi_block = tag_inner[fi_abs:fi_e]
-					type_m = re.search(r"\btype\s*=\s*(\w+)", fi_block)
-					if type_m and type_m.group(1).lower() == f_type.lower():
-						existing_fm_insert = tag_block_start + 1 + fi_e - 1
-						scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_block)
-						if scope_m:
-							existing_fm_scope = scope_m.group(1)
-					fi_cursor = fi_e
-
-			if unit_buffer:
-				if existing_fm_insert is not None:
-					self.log(f"      [MERGE] Merging {len(unit_buffer)} unit(s) into existing {f_type} for c:{new_tag}")
-					units_text = "\n\t\t\t# Transferred Units\n\t\t\t" + "\n\t\t\t".join(unit_buffer)
-					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
+			# --- Group units by the strategic region of their state_region ---
+			region_units = {}  # sr_clean -> [unit_block, ...]
+			fallback_sr = target_region.replace("sr:", "").strip() if target_region else None
+			for unit in unit_buffer:
+				sr_m = re.search(r"state_region\s*=\s*(?:s:)?\"?([A-Za-z0-9_]+)\"?", unit, re.IGNORECASE)
+				if sr_m:
+					state_key = self.normalize_state_key(sr_m.group(1))
+					sr = self.find_strategic_region(f"s:{state_key}")
+					sr_clean = sr.replace("sr:", "").strip() if sr else fallback_sr
 				else:
-					self.log(f"      [CREATE] Creating {f_type} formation for c:{new_tag}")
-					clean_region_str = target_region.strip()
-					if not clean_region_str.startswith("sr:"):
-						hq_region_val = f"sr:{clean_region_str}"
-					else:
-						hq_region_val = clean_region_str
-					immersive_name = self.generate_immersive_name(clean_region_str, f_type)
-					new_fm_scope = f"auto_{new_tag.lower()}_{f_type}"
-					unit_str = "\n\t\t" + "\n\t\t".join(unit_buffer)
+					sr_clean = fallback_sr
+				if sr_clean:
+					region_units.setdefault(sr_clean, []).append(unit)
+				else:
+					self.log(f"      [WARN] Could not resolve strategic region for a unit. Skipping.", 'warn')
+
+			first_fm_scope = None  # used to link generals
+
+			# --- Per-region: merge into matching existing formation or create new ---
+			for sr_key, units in region_units.items():
+				hq_region_val = f"sr:{sr_key}"
+
+				# Re-find c:{new_tag} block (positions shift after each insertion)
+				last_tag_pos = -1
+				curr = 0
+				while True:
+					ns, ne = self.get_block_range_safe(file_content, f"c:{new_tag}", curr)
+					if ns is None: break
+					last_tag_pos = ns
+					curr = ne
+
+				# Search for existing formation: same type AND matching hq_region
+				existing_fm_insert = None
+				existing_fm_scope = None
+				if last_tag_pos != -1:
+					tag_block_start, tag_block_end = self.find_block_content(file_content, last_tag_pos)
+					tag_inner = file_content[tag_block_start + 1 : tag_block_end - 1]
+					fi_cursor = 0
+					while True:
+						fi_m = re.search(r"create_military_formation\s*=\s*\{", tag_inner[fi_cursor:])
+						if not fi_m: break
+						fi_abs = fi_cursor + fi_m.start()
+						fi_s, fi_e = self.find_block_content(tag_inner, fi_cursor + fi_m.end() - 1)
+						if fi_s is None: break
+						fi_block = tag_inner[fi_abs:fi_e]
+						type_m = re.search(r"\btype\s*=\s*(\w+)", fi_block)
+						hq_m = re.search(r"hq_region\s*=\s*(?:sr:)?\"?([A-Za-z0-9_]+)\"?", fi_block)
+						if (type_m and type_m.group(1).lower() == f_type.lower() and
+								hq_m and hq_m.group(1).strip() == sr_key):
+							existing_fm_insert = tag_block_start + 1 + fi_e - 1
+							scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_block)
+							if scope_m:
+								existing_fm_scope = scope_m.group(1)
+						fi_cursor = fi_e
+
+				if existing_fm_insert is not None:
+					self.log(f"      [MERGE] Merging {len(units)} unit(s) into existing {f_type} ({sr_key}) for c:{new_tag}")
+					units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
+					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
+					first_fm_scope = first_fm_scope or existing_fm_scope
+				else:
+					self.log(f"      [CREATE] Creating {f_type} formation ({sr_key}) for c:{new_tag}")
+					immersive_name = self.generate_immersive_name(sr_key, f_type)
+					new_fm_scope = f"auto_{new_tag.lower()}_{sr_key}_{f_type}"
+					unit_str = "\n" + indent_units(units, 3)
 					print(unit_str)	# todo: unit_buffer check
 					block_str = (
-						f"\n\tcreate_military_formation = {{"
-						f"\n\t\tname = {immersive_name}"
-						f"\n\t\ttype = {f_type}"
-						f"\n\t\thq_region = {hq_region_val}"
-						f"\n\t\tsave_scope_as = {new_fm_scope}"
-						f"\n\t\t# Transferred Units"
+						f"\n\t\tcreate_military_formation = {{"
+						f"\n\t\t\tname = {immersive_name}"
+						f"\n\t\t\ttype = {f_type}"
+						f"\n\t\t\thq_region = {hq_region_val}"
+						f"\n\t\t\tsave_scope_as = {new_fm_scope}"
+						f"\n\t\t\t# Transferred Units"
 						f"{unit_str}"
-						f"\n\t}}"
+						f"\n\t\t}}"
 					)
 					if last_tag_pos != -1:
 						_, end_brace = self.find_block_content(file_content, last_tag_pos)
@@ -2233,9 +2365,9 @@ class Vic3Logic:
 							file_content = file_content[:insert_pos] + f"\n\tc:{new_tag} ?= {{\n{block_str}\n\t}}\n" + file_content[insert_pos:]
 						else:
 							file_content = file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"
-					existing_fm_scope = new_fm_scope
+					first_fm_scope = first_fm_scope or new_fm_scope
 
-			# --- Inject duplicated generals into the destination country block ---
+			# --- Inject generals into the first formation created/merged ---
 			if general_buffer:
 				last_tag_pos2 = -1
 				curr2 = 0
@@ -2248,12 +2380,12 @@ class Vic3Logic:
 					_, end_brace2 = self.find_block_content(file_content, last_tag_pos2)
 					insert_pos2 = end_brace2 - 1
 					gen_str = ""
-					for char_block, orig_scope, new_scope in general_buffer:
+					for char_block, gen_scope in general_buffer:
 						gen_str += f"\n\t{char_block}"
-						if existing_fm_scope:
+						if first_fm_scope:
 							gen_str += (
-								f"\n\tscope:{new_scope} = {{"
-								f"\n\t\ttransfer_to_formation = scope:{existing_fm_scope}"
+								f"\n\tscope:{gen_scope} = {{"
+								f"\n\t\ttransfer_to_formation = scope:{first_fm_scope}"
 								f"\n\t}}"
 							)
 					file_content = file_content[:insert_pos2] + gen_str + "\n" + file_content[insert_pos2:]
@@ -3597,14 +3729,14 @@ class Vic3Logic:
 
 		items = [
 			("localization/english/countries_l_english.yml", False),
-			("common/amendments", True),
-			("common/character_templates", True),
-			("common/coat_of_arms", True),
+			# ("common/buildings", True),
+			# ("common/character_templates", True),
+			# ("common/coat_of_arms", True),
 			("common/country_definitions", True),
-			("common/cultures", True),
+			# ("common/cultures", True),
 			("common/strategic_regions", True),
 			("common/history/buildings", True),
-			("common/history/characters", True),
+			# ("common/history/characters", True),
 			("common/history/countries", True),
 			("common/history/diplomacy", True),
 			("common/history/military_formations", True),
@@ -3616,10 +3748,11 @@ class Vic3Logic:
 			("common/history/power_blocs", True),
 			("common/history/lobbies/00_lobbies.txt", False),
 			("common/religions", True),
+			("common/scripted_effects", True)
+			("common/scripted_triggers", True)
 			("common/journal_entries", True),
 			("common/laws", True),
 			("common/technology/technologies", True),
-			("common/buildings", True),
 			("map_data", True)
 			# ("gfx/map/map_object_data", True)
 		]
@@ -4652,6 +4785,12 @@ class Vic3Logic:
 										tm = re.search(r'building\s*=\s*"?([A-Za-z0-9_]+)"?', b_inner)
 										if tm: b_type = tm.group(1)
 
+										# Auto-managed buildings must never have ownership patched
+										if b_type in ["building_subsistence_farms", "building_urban_center", "building_trade_center"]:
+											new_rs_parts.append(b_full)
+											b_cursor = bs_e
+											continue
+
 										# Check add_ownership
 										am = re.search(r"add_ownership\s*=\s*\{", b_inner)
 										if am:
@@ -4706,10 +4845,7 @@ class Vic3Logic:
 														break # Parsing error
 
 												if ao_modified:	# todo
-													new_ao_block = (
-														"\n\t\t\t\tadd_ownership = {"
-														# "\n\t\t\t\t\t# made with clean_transferred_state_references ao_modified"
-													) + "".join(new_ao_parts) + "\n\t\t\t\t}"
+													new_ao_block = "\n\t\t\t\tadd_ownership = {" + "".join(new_ao_parts).rstrip() + "\n\t\t\t\t}"
 													new_b_inner = b_inner[:am.start()].rstrip() + new_ao_block + b_inner[as_e:]
 													new_b_full = b_full[:bs_s-b_start+1] + new_b_inner.rstrip() + "\n\t\t\t}"
 													new_rs_parts.append(new_b_full)
@@ -4823,14 +4959,14 @@ class Vic3Logic:
 								# 1. Nationalize
 								if re.search(r"\bc:" + re.escape(clean_old) + r"\b", rs_content, re.IGNORECASE):
 									pattern_generic = re.compile(r"\bc:" + re.escape(clean_old) + r"\b", re.IGNORECASE)
-									rs_content = pattern_generic.sub(f"c:{effective_owner}", rs_content)
+									rs_content = pattern_generic.sub(f"c:{clean_target}", rs_content)
 
 								# 2. Cleanup Empty
 								rs_content = re.sub(r"add_ownership\s*=\s*\{\s*\}", "", rs_content)
 								rs_content = re.sub(r"create_building\s*=\s*\{\s*\}", "", rs_content)
 
 								# 3. Fix Ownership (Pass State Name!)
-								rs_content = self.fix_building_ownership(rs_content, effective_owner, state_name, old_tag=clean_old)
+								rs_content = self.fix_building_ownership(rs_content, effective_owner, state_name, old_tag=clean_old, full_annex=True)
 
 								if rs_content != original_rs_content:
 									# Replace in state_body_new
