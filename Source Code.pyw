@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import shutil
 import traceback
@@ -1805,23 +1805,31 @@ class Vic3Logic:
 						if "owned_provinces" in new_c:
 							npm = re.search(r"owned_provinces\s*=\s*\{", new_c)
 							ns, ne = self.find_block_content(new_c, npm.end()-1)
-							new_c = new_c[:ne-1] + " " + provinces + " " + new_c[ne-1:]	# todo
+							# Detect indentation from existing province content
+							prov_lines = new_c[ns+1:ne-1].split('\n')
+							prov_indent = "\t\t\t\t\t"
+							for line in prov_lines:
+								if line.strip():
+									prov_indent = re.match(r'^(\s*)', line).group(1)
+									break
+							# Detect closing brace indentation
+							close_indent = "\t\t\t\t"
+							before_close = new_c[:ne-1]
+							last_nl = before_close.rfind('\n')
+							if last_nl >= 0 and not before_close[last_nl+1:].strip():
+								close_indent = before_close[last_nl+1:]
+							new_c = new_c[:ne-1].rstrip() + f"\n{prov_indent}{provinces}\n{close_indent}" + new_c[ne-1:]
 						else:
 							lb = new_c.rfind('}')
-							# new_c = new_c[:lb] + f"\n\t\towned_provinces = {{ {provinces} }}\n" + new_c[lb:]
-							new_c = new_c[:lb] + (
-								f"\b\t\towned_provinces = {{"
-								f"\b\t\t\t# made with merge_split_state"
-								f"{provinces}"
-								f"\b\t\t}}"
-							) + new_c[lb:]
+							new_c = new_c[:lb] + f"\n\t\towned_provinces = {{\n\t\t\t{provinces}\n\t\t}}\n" + new_c[lb:]
 
 					first = old_range if old_range[0] < new_range[0] else new_range
 					second = new_range if old_range[0] < new_range[0] else old_range
 					if first == old_range:
-						return content[:first[0]] + content[first[1]:second[0]] + new_c + content[second[1]:]
+						# Strip trailing whitespace (indentation before removed old block) to avoid blank lines
+						return content[:first[0]].rstrip() + content[first[1]:second[0]] + new_c + content[second[1]:]
 					else:
-						return content[:first[0]] + new_c + content[first[1]:second[0]] + content[second[1]:]
+						return content[:first[0]] + new_c + content[first[1]:second[0]].rstrip() + content[second[1]:]
 
 			return self.sanitize_block_content(content, state_name, old_tag, new_tag, False)
 
@@ -2249,13 +2257,8 @@ class Vic3Logic:
 		has_wrapper_new = bool(re.search(r"(?:^|\s)MILITARY_FORMATIONS\s*=", new_file_content))
 
 		if has_wrapper_orig and not has_wrapper_new:
-			self.log("[FIX] Restoring missing MILITARY_FORMATIONS wrapper.")
-			# Wrap the whole content
-			new_file_content = (
-				f"MILITARY_FORMATIONS = {{"
-				f"{new_file_content}"
-				f"\n}}"
-			)
+			self.log("[FIX] Restoring missing MILITARY_FORMATIONS wrapper (post-reconstruction).", 'warn')
+			new_file_content = f"MILITARY_FORMATIONS = {{\n{new_file_content}\n}}"
 
 		def inject_new_formation(file_content, unit_buffer, f_type, general_buffer=None):
 			if not unit_buffer and not general_buffer:
@@ -2396,6 +2399,12 @@ class Vic3Logic:
 			new_file_content = inject_new_formation(new_file_content, stolen_units_army, "army", stolen_generals_army)
 		if stolen_units_fleet or stolen_generals_fleet:
 			new_file_content = inject_new_formation(new_file_content, stolen_units_fleet, "fleet", stolen_generals_fleet)
+
+		# Final defensive wrapper guard — catches any corruption introduced by inject_new_formation
+		if has_wrapper_orig and not re.search(r"(?:^|\s)MILITARY_FORMATIONS\s*=", new_file_content):
+			self.log("[FIX] Restoring missing MILITARY_FORMATIONS wrapper (final guard).", 'warn')
+			new_file_content = f"MILITARY_FORMATIONS = {{\n{new_file_content}\n}}"
+
 		with open(filepath, 'w', encoding='utf-8-sig') as f:
 			f.write(new_file_content)
 		return True
