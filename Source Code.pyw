@@ -891,21 +891,18 @@ class Vic3Logic:
 		units_block = ""
 		# Using state_region and count
 		if manowar > 0:
-			units_block += f"\n\t\t\tcombat_unit = {{"
-			units_block += f"\n\t\t\t\ttype = unit_type:combat_unit_type_man_o_war"
-			units_block += f"\n\t\t\t\tstate_region = s:{final_state}"
+			units_block += f"\n\t\t\tship = {{"
+			units_block += f"\n\t\t\t\ttype = ship_type:ship_type_ship_of_the_line"
 			units_block += f"\n\t\t\t\tcount = {manowar}"
 			units_block += f"\n\t\t\t}}"
 		if frigate > 0:
-			units_block += f"\n\t\t\tcombat_unit = {{"
-			units_block += f"\n\t\t\t\ttype = unit_type:combat_unit_type_frigate"
-			units_block += f"\n\t\t\t\tstate_region = s:{final_state}"
+			units_block += f"\n\t\t\tship = {{"
+			units_block += f"\n\t\t\t\ttype = ship_type:ship_type_frigate"
 			units_block += f"\n\t\t\t\tcount = {frigate}"
 			units_block += f"\n\t\t\t}}"
 		if ironclad > 0:
-			units_block += f"\n\t\t\tcombat_unit = {{"
-			units_block += f"\n\t\t\t\ttype = unit_type:combat_unit_type_ironclad"
-			units_block += f"\n\t\t\t\tstate_region = s:{final_state}"
+			units_block += f"\n\t\t\tship = {{"
+			units_block += f"\n\t\t\t\ttype = ship_type:ship_type_early_ironclad"
 			units_block += f"\n\t\t\t\tcount = {ironclad}"
 			units_block += f"\n\t\t\t}}"
 
@@ -2102,72 +2099,85 @@ class Vic3Logic:
 					units_stolen_this_formation = False
 					self.log(f"[MIL] -> Checking formation '{form_name}'")
 
-					while f_cursor < len(f_body):
-						u_match = re.search(r"combat_unit\s*=\s*\{", f_body[f_cursor:])
-						if not u_match:
-							new_f_body_parts.append(f_body[f_cursor:])
-							break
-
-						u_abs_start = f_cursor + u_match.start()
-
-						# Check if commented out
-						substring = f_body[f_cursor:u_abs_start]
-						last_newline = substring.rfind('\n')
-						line_prefix = substring[last_newline+1:] if last_newline != -1 else substring
-						if '#' in line_prefix:
-							new_f_body_parts.append(f_body[f_cursor:u_abs_start + u_match.end()])
-							f_cursor = u_abs_start + u_match.end()
-							continue
-
-						new_f_body_parts.append(f_body[f_cursor:u_abs_start])
-
-						u_brace_idx = u_abs_start + u_match.group().find('{')
-						u_start, u_end = self.find_block_content(f_body, u_brace_idx)
-
-						if u_start is None:
-							new_f_body_parts.append(f_body[u_abs_start:])
-							break
-
-						unit_block = f_body[u_abs_start:u_end]
-
-						# --- HIERARCHICAL PARSING & STATE EXTRACTION ---
-						# Extract state_region value, stripping 's:' if present, handles quotes
-						sr_match = re.search(r"state_region\s*=\s*(?:s:)?\"?([A-Za-z0-9_]+)\"?", unit_block)
-						found_state = None
-
-						if sr_match:
-							raw_state = sr_match.group(1)
-							norm_state = self.normalize_state_key(raw_state)
-							if norm_state in target_states_norm:
-								found_state = norm_state
-
-						if found_state:
-							# --- LOGGING ---
-							self.log(f"[MIL] Found combat_unit in {found_state} under c:{found_tag}")
-							self.log(f"[MIL] -> Transferring unit to c:{new_tag}")
-
-							clean_block = self.clean_unit_string(unit_block)
-
-							# RE-HOME UNIT IF NEEDED
-							if dest_home_state:
-								# Replace the state_region value safely
-								clean_block = re.sub(r"state_region\s*=\s*(?:s:)?\"?[A-Za-z0-9_.-]+\"?", f"state_region = s:{dest_home_state}", clean_block)
-
-							if is_army: stolen_units_army.append(clean_block)
-							elif is_fleet: stolen_units_fleet.append(clean_block)
-
-							self.log(f"[MIL] Removed combat_unit from {form_name} formation.")
-							files_modified = True
-							units_stolen_this_formation = True
-						else:
-							new_f_body_parts.append(unit_block)
-
-						f_cursor = u_end
+					if is_fleet:
+						# Fleet ships (1.13+): ship = { type = ship_type:... count = N }
+						while f_cursor < len(f_body):
+							u_match = re.search(r"(?<!\w)ship\s*=\s*\{", f_body[f_cursor:])
+							if not u_match:
+								new_f_body_parts.append(f_body[f_cursor:])
+								break
+							u_abs_start = f_cursor + u_match.start()
+							substring = f_body[f_cursor:u_abs_start]
+							last_newline = substring.rfind('\n')
+							line_prefix = substring[last_newline+1:] if last_newline != -1 else substring
+							if '#' in line_prefix:
+								new_f_body_parts.append(f_body[f_cursor:u_abs_start + u_match.end()])
+								f_cursor = u_abs_start + u_match.end()
+								continue
+							new_f_body_parts.append(f_body[f_cursor:u_abs_start])
+							u_brace_idx = u_abs_start + u_match.group().find('{')
+							u_start, u_end = self.find_block_content(f_body, u_brace_idx)
+							if u_start is None:
+								new_f_body_parts.append(f_body[u_abs_start:])
+								break
+							unit_block = f_body[u_abs_start:u_end]
+							if formation_in_scope:
+								self.log(f"[MIL] Transferring fleet ship to c:{new_tag}")
+								clean_block = self.clean_unit_string(unit_block)
+								stolen_units_fleet.append(clean_block)
+								files_modified = True
+								units_stolen_this_formation = True
+							else:
+								new_f_body_parts.append(unit_block)
+							f_cursor = u_end
+					else:
+						# Army: extract combat_unit blocks by state_region
+						while f_cursor < len(f_body):
+							u_match = re.search(r"combat_unit\s*=\s*\{", f_body[f_cursor:])
+							if not u_match:
+								new_f_body_parts.append(f_body[f_cursor:])
+								break
+							u_abs_start = f_cursor + u_match.start()
+							substring = f_body[f_cursor:u_abs_start]
+							last_newline = substring.rfind('\n')
+							line_prefix = substring[last_newline+1:] if last_newline != -1 else substring
+							if '#' in line_prefix:
+								new_f_body_parts.append(f_body[f_cursor:u_abs_start + u_match.end()])
+								f_cursor = u_abs_start + u_match.end()
+								continue
+							new_f_body_parts.append(f_body[f_cursor:u_abs_start])
+							u_brace_idx = u_abs_start + u_match.group().find('{')
+							u_start, u_end = self.find_block_content(f_body, u_brace_idx)
+							if u_start is None:
+								new_f_body_parts.append(f_body[u_abs_start:])
+								break
+							unit_block = f_body[u_abs_start:u_end]
+							sr_match = re.search(r"state_region\s*=\s*(?:s:)?\"?([A-Za-z0-9_]+)\"?", unit_block)
+							found_state = None
+							if sr_match:
+								raw_state = sr_match.group(1)
+								norm_state = self.normalize_state_key(raw_state)
+								if norm_state in target_states_norm:
+									found_state = norm_state
+							if found_state:
+								self.log(f"[MIL] Found combat_unit in {found_state} under c:{found_tag}")
+								self.log(f"[MIL] -> Transferring unit to c:{new_tag}")
+								clean_block = self.clean_unit_string(unit_block)
+								if dest_home_state:
+									clean_block = re.sub(r"state_region\s*=\s*(?:s:)?\"?[A-Za-z0-9_.-]+\"?", f"state_region = s:{dest_home_state}", clean_block)
+								stolen_units_army.append(clean_block)
+								self.log(f"[MIL] Removed combat_unit from {form_name} formation.")
+								files_modified = True
+								units_stolen_this_formation = True
+							else:
+								new_f_body_parts.append(unit_block)
+							f_cursor = u_end
 
 					rebuilt_formation_body = "".join(new_f_body_parts)
 
 					# Check if formation is empty
-					if "combat_unit" not in rebuilt_formation_body:
+					if (is_army and "combat_unit" not in rebuilt_formation_body) or \
+					   (is_fleet and not re.search(r"(?<!\w)ship\s*=\s*\{", rebuilt_formation_body)):
 						self.log(f"      [DELETE] Formation {form_name} became empty. Deleted.")
 						files_modified = True
 						# Track scope for general relocation (rules 2 & 3)
@@ -3795,13 +3805,13 @@ class Vic3Logic:
 		# Note: common/character_templates* -> is_recursive=True
 
 		items = [
-			# ("common/buildings", True),
-			# ("common/character_templates", True),
-			# ("common/coat_of_arms", True),
+			("common/buildings", True),
+			("common/character_templates", True),
+			("common/coat_of_arms", True),
 			("common/country_definitions", True),
-			# ("common/cultures", True),
+			("common/cultures", True),
 			("common/history/buildings", True),
-			# ("common/history/characters", True),
+			("common/history/characters", True),
 			("common/history/countries", True),
 			("common/history/diplomacy", True),
 			("common/history/military_formations", True),
@@ -7691,39 +7701,55 @@ class Vic3Logic:
 								if m_hq: f_data["hq"] = m_hq.group(1)
 
 								# Extract Units
-								# combat_unit = { type = ... count = ... }
 								u_cursor = 0
-								while True:
-									m_unit = re.search(r"combat_unit\s*=\s*\{", form_inner[u_cursor:])
-									if not m_unit:
-										break
-									
-									us, ue = self.find_block_content(form_inner, u_cursor + m_unit.end() - 1)
-									if us:
-										u_block = form_inner[us:ue]
-										# Parse type and count
-										ut_m = re.search(r"type\s*=\s*unit_type:([A-Za-z0-9_]+)", u_block)
-										uc_m = re.search(r"count\s*=\s*(\d+)", u_block)
-										
-										if ut_m and uc_m:
-											utype = ut_m.group(1)
-											ucount = int(uc_m.group(1))
-											
-											# Simplify keys
-											# Simplify keys
-											if "infantry" in utype: k = "infantry"
-											elif "artillery" in utype: k = "artillery"
-											elif any(x in utype for x in ["hussars", "cavalry", "dragoons", "lancers", "cuirassiers"]): k = "cavalry"
-											elif "man_o_war" in utype: k = "manowar"
-											elif "frigate" in utype or "monitor" in utype: k = "frigate"
-											elif "ironclad" in utype: k = "ironclad"
-											else: k = utype
-											
-											f_data["units"][k] = f_data["units"].get(k, 0) + ucount
-										
-										u_cursor = ue
-									else:
-										u_cursor += 1
+								is_fleet_type = f_data.get("type", "army") == "fleet"
+								if is_fleet_type:
+									# Ship blocks for fleet formations (1.13+)
+									while True:
+										m_unit = re.search(r"(?<!\w)ship\s*=\s*\{", form_inner[u_cursor:])
+										if not m_unit:
+											break
+										us, ue = self.find_block_content(form_inner, u_cursor + m_unit.end() - 1)
+										if us:
+											u_block = form_inner[us:ue]
+											ut_m = re.search(r"type\s*=\s*ship_type:([A-Za-z0-9_]+)", u_block)
+											uc_m = re.search(r"count\s*=\s*(\d+)", u_block)
+											if ut_m and uc_m:
+												utype = ut_m.group(1)
+												ucount = int(uc_m.group(1))
+												if "ship_of_the_line" in utype: k = "manowar"
+												elif "frigate" in utype: k = "frigate"
+												elif "ironclad" in utype: k = "ironclad"
+												else: k = utype
+												f_data["units"][k] = f_data["units"].get(k, 0) + ucount
+											u_cursor = ue
+										else:
+											u_cursor += 1
+								else:
+									# combat_unit blocks for army formations
+									while True:
+										m_unit = re.search(r"combat_unit\s*=\s*\{", form_inner[u_cursor:])
+										if not m_unit:
+											break
+										us, ue = self.find_block_content(form_inner, u_cursor + m_unit.end() - 1)
+										if us:
+											u_block = form_inner[us:ue]
+											ut_m = re.search(r"type\s*=\s*unit_type:([A-Za-z0-9_]+)", u_block)
+											uc_m = re.search(r"count\s*=\s*(\d+)", u_block)
+											if ut_m and uc_m:
+												utype = ut_m.group(1)
+												ucount = int(uc_m.group(1))
+												if "infantry" in utype: k = "infantry"
+												elif "artillery" in utype: k = "artillery"
+												elif any(x in utype for x in ["hussars", "cavalry", "dragoons", "lancers", "cuirassiers"]): k = "cavalry"
+												elif "man_o_war" in utype: k = "manowar"
+												elif "frigate" in utype or "monitor" in utype: k = "frigate"
+												elif "ironclad" in utype: k = "ironclad"
+												else: k = utype
+												f_data["units"][k] = f_data["units"].get(k, 0) + ucount
+											u_cursor = ue
+										else:
+											u_cursor += 1
 
 								formations.append(f_data)
 								inner_cursor = e_form
@@ -7910,12 +7936,10 @@ class Vic3Logic:
 				new_block = new_block.replace('{', f'{{\n\t\t\tname = "{new_name}"', 1)	# todo
 			
 			# 2. Update Units
-			# We need to replace all combat_unit blocks with new ones.
-			# Strategy: Strip existing combat_units, append new ones.
-			
-			# Strip existing
+			is_fleet_fm = formation_data.get("type", "army") == "fleet"
+			strip_pat = r"(?<!\w)ship\s*=\s*\{" if is_fleet_fm else r"combat_unit\s*=\s*\{"
 			while True:
-				mu = re.search(r"combat_unit\s*=\s*\{", new_block)
+				mu = re.search(strip_pat, new_block)
 				if not mu:
 					break
 				ms, me = self.find_block_content(new_block, mu.end()-1)
@@ -7923,45 +7947,39 @@ class Vic3Logic:
 					new_block = new_block[:mu.start()] + new_block[me:]
 				else:
 					break
-			
-			# Find insertion point (before last brace)
 			last_brace = new_block.rfind('}')
-			
-			# Construct new units
-			# We need a location (state_region) for units.
-			# We don't know the exact state_region if not stored in data? 
-			# scan extracted HQ, but units need state_region.
-			# We should probably preserve one valid state_region from original units if possible?
-			# Or scan it during read.
-			# Let's default to Capital or search for existing state_region usage in original block?
-			
-			# Extract a reference state from original block before stripping
-			ref_state = "s:STATE_UNKNOWN"
-			m_st = re.search(r"state_region\s*=\s*([A-Za-z0-9_:]+)", original_block)
-			if m_st:
-				ref_state = m_st.group(1)
-			
 			units_str = ""
-			for u_type, u_count in new_units.items():	# todo: figure this out
-				if u_count <= 0: continue
-				
-				# Map back to game keys
-				real_type = ""
-				if u_type == "infantry": real_type = "unit_type:combat_unit_type_line_infantry"
-				elif u_type == "artillery": real_type = "unit_type:combat_unit_type_cannon_artillery"
-				elif u_type == "cavalry": real_type = "unit_type:combat_unit_type_hussars"
-				elif u_type == "manowar": real_type = "unit_type:combat_unit_type_man_o_war"
-				elif u_type == "frigate": real_type = "unit_type:combat_unit_type_frigate"
-				elif u_type == "ironclad": real_type = "unit_type:combat_unit_type_ironclad"
-				else: real_type = f"unit_type:{u_type}" if not u_type.startswith("unit_type:") else u_type
-				
-				units_str += (
-					f"\n\t\t\tcombat_unit = {{"
-					f"\n\t\t\t\ttype = {real_type}"
-					f"\n\t\t\t\tstate_region = {ref_state}"
-					f"\n\t\t\t\tcount = {u_count}"
-					f"\n\t\t\t}}"
-				)
+			if is_fleet_fm:
+				for u_type, u_count in new_units.items():
+					if u_count <= 0: continue
+					if u_type == "manowar": real_type = "ship_type:ship_type_ship_of_the_line"
+					elif u_type == "frigate": real_type = "ship_type:ship_type_frigate"
+					elif u_type == "ironclad": real_type = "ship_type:ship_type_early_ironclad"
+					else: real_type = f"ship_type:{u_type}" if not u_type.startswith("ship_type:") else u_type
+					units_str += (
+						f"\n\t\t\tship = {{"
+						f"\n\t\t\t\ttype = {real_type}"
+						f"\n\t\t\t\tcount = {u_count}"
+						f"\n\t\t\t}}"
+					)
+			else:
+				ref_state = "s:STATE_UNKNOWN"
+				m_st = re.search(r"state_region\s*=\s*([A-Za-z0-9_:]+)", original_block)
+				if m_st:
+					ref_state = m_st.group(1)
+				for u_type, u_count in new_units.items():
+					if u_count <= 0: continue
+					if u_type == "infantry": real_type = "unit_type:combat_unit_type_line_infantry"
+					elif u_type == "artillery": real_type = "unit_type:combat_unit_type_cannon_artillery"
+					elif u_type == "cavalry": real_type = "unit_type:combat_unit_type_hussars"
+					else: real_type = f"unit_type:{u_type}" if not u_type.startswith("unit_type:") else u_type
+					units_str += (
+						f"\n\t\t\tcombat_unit = {{"
+						f"\n\t\t\t\ttype = {real_type}"
+						f"\n\t\t\t\tstate_region = {ref_state}"
+						f"\n\t\t\t\tcount = {u_count}"
+						f"\n\t\t\t}}"
+					)
 
 			new_block = new_block[:last_brace].rstrip() + units_str + "\n\t\t}"
 
@@ -10106,7 +10124,7 @@ class App(tk.Tk):
 			self.mil_name.set("First Fleet" if "Army" in self.mil_name.get() else self.mil_name.get())
 			self.mil_loc_lbl.config(text="(Warning: Must be Coastal or Game Crash!)", foreground="#EF5350")
 
-			ttk.Label(self.mil_unit_frame, text="Man-of-War:").grid(row=0, column=0, padx=5)
+			ttk.Label(self.mil_unit_frame, text="Ship of the Line:").grid(row=0, column=0, padx=5)
 			self.mil_u1 = tk.IntVar(value=5)
 			ttk.Entry(self.mil_unit_frame, textvariable=self.mil_u1, width=5).grid(row=0, column=1, padx=5)
 
@@ -10114,7 +10132,7 @@ class App(tk.Tk):
 			self.mil_u2 = tk.IntVar(value=10)
 			ttk.Entry(self.mil_unit_frame, textvariable=self.mil_u2, width=5).grid(row=0, column=3, padx=5)
 
-			ttk.Label(self.mil_unit_frame, text="Ironclad:").grid(row=0, column=4, padx=5)
+			ttk.Label(self.mil_unit_frame, text="Early Ironclad:").grid(row=0, column=4, padx=5)
 			self.mil_u3 = tk.IntVar(value=0)
 			ttk.Entry(self.mil_unit_frame, textvariable=self.mil_u3, width=5).grid(row=0, column=5, padx=5)
 
