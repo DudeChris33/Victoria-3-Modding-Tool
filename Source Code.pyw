@@ -129,6 +129,9 @@ class Vic3Logic:
 
 	def scan_all_country_colors(self):
 		"""Scans both mod and vanilla for country colors. Returns {tag: (r,g,b)}."""
+		def clamp_rgb(rgb):
+			return tuple(max(0, min(255, int(v))) for v in rgb)
+
 		colors = {}
 		paths = []
 		if self.mod_path: paths.append(os.path.join(self.mod_path, "common/country_definitions"))
@@ -194,6 +197,8 @@ class Vic3Logic:
 										rgb = (int(v1*255), int(v2*255), int(v3*255))
 									else:
 										rgb = (int(v1), int(v2), int(v3))
+
+								rgb = clamp_rgb(rgb)
 
 								# Mod overrides vanilla
 								if tag not in colors or p.startswith(self.mod_path):
@@ -2478,10 +2483,10 @@ class Vic3Logic:
 		# 1. Locate file
 		paths = []
 		if self.mod_path:
-			paths.append(os.path.join(self.mod_path, "map/data/state_regions"))
+			# paths.append(os.path.join(self.mod_path, "map/data/state_regions"))
 			paths.append(os.path.join(self.mod_path, "map_data/state_regions"))
 		if self.vanilla_path:
-			paths.append(os.path.join(self.vanilla_path, "game/map/data/state_regions"))
+			# paths.append(os.path.join(self.vanilla_path, "game/map/data/state_regions"))
 			paths.append(os.path.join(self.vanilla_path, "game/map_data/state_regions"))
 
 		data = {
@@ -8265,10 +8270,11 @@ class StateManager:
 
 		paths = []
 		if self.logic.mod_path:
-			paths.append(os.path.join(self.logic.mod_path, "map/data/state_regions"))
+			# paths.append(os.path.join(self.logic.mod_path, "map/data/state_regions"))
 			paths.append(os.path.join(self.logic.mod_path, "map_data/state_regions"))
 		if self.logic.vanilla_path:
-			paths.append(os.path.join(self.logic.vanilla_path, "game/map/data/state_regions"))
+			# paths.append(os.path.join(self.logic.vanilla_path, "game/map/data/state_regions"))
+			paths.append(os.path.join(self.logic.vanilla_path, "game/map_data/state_regions"))
 
 		for p in reversed(paths):
 			if not os.path.exists(p): continue
@@ -13062,6 +13068,9 @@ class Vic3ProvincePainter(tk.Toplevel):
 		self.province_owner_map = {} # hex -> owner_tag
 		self.country_colors = {} # tag -> (r,g,b)
 		self.province_indices = None # Numpy array of hex colors (or mapped indices)
+		self.province_rgb_image = None # Cached RGB image for province mode
+		self.unique_province_values = None # Unique packed province colors
+		self.province_palette_inverse = None # Cached inverse palette map
 		self.map_width = 0
 		self.map_height = 0
 		self.scale_factor = 0.25
@@ -13261,16 +13270,22 @@ class Vic3ProvincePainter(tk.Toplevel):
 			traceback.print_exc()
 
 	def finish_loading_success(self):
-		self.refresh_map()
-		self.status_var.set("Ready. Left Click to Paint, Right Click to Pick.")
+		try:
+			self.refresh_map()
+			self.status_var.set("Ready. Left Click to Paint, Right Click to Pick.")
+		except Exception as e:
+			self.status_var.set(f"Render Error: {e}")
+			traceback.print_exc()
 
 	def parse_state_regions(self):
-		# Scan map/data/state_regions
+		# Scan map_data/state_regions
 		paths = []
 		if self.logic.mod_path:
-			paths.append(os.path.join(self.logic.mod_path, "map/data/state_regions"))
+			# paths.append(os.path.join(self.logic.mod_path, "map/data/state_regions"))
 			paths.append(os.path.join(self.logic.mod_path, "map_data/state_regions"))
-		if self.logic.vanilla_path: paths.append(os.path.join(self.logic.vanilla_path, "game/map/data/state_regions"))
+		if self.logic.vanilla_path:
+			# paths.append(os.path.join(self.logic.vanilla_path, "game/map/data/state_regions"))
+			paths.append(os.path.join(self.logic.vanilla_path, "game/map_data/state_regions"))
 
 		for p in paths:
 			if not os.path.exists(p): continue
@@ -13389,9 +13404,11 @@ class Vic3ProvincePainter(tk.Toplevel):
 			# Try mod then vanilla
 			candidates = []
 			if self.logic.mod_path:
-				candidates.append(os.path.join(self.logic.mod_path, "map/data/provinces.png"))
+				# candidates.append(os.path.join(self.logic.mod_path, "map/data/provinces.png"))
 				candidates.append(os.path.join(self.logic.mod_path, "map_data/provinces.png"))
-			if self.logic.vanilla_path: candidates.append(os.path.join(self.logic.vanilla_path, "game/map/data/provinces.png"))
+			if self.logic.vanilla_path:
+				# candidates.append(os.path.join(self.logic.vanilla_path, "game/map/data/provinces.png"))
+				candidates.append(os.path.join(self.logic.vanilla_path, "game/map_data/provinces.png"))
 
 			path = next((x for x in candidates if os.path.exists(x)), None)
 			if not path:
@@ -13414,11 +13431,20 @@ class Vic3ProvincePainter(tk.Toplevel):
 		self.map_width, self.map_height = new_w, new_h
 
 		# Convert to numpy array of indices (packed RGB)
-		arr = np.array(img_small) # (H, W, 3)
+		arr = np.array(img_small)
+		if arr.ndim == 2:
+			arr = np.stack((arr, arr, arr), axis=-1)
+		elif arr.shape[2] > 3:
+			arr = arr[:, :, :3]
+		arr = arr.astype(np.uint8, copy=False)
+		self.province_rgb_image = arr.copy()
 		R = arr[:,:,0].astype(np.int32)
 		G = arr[:,:,1].astype(np.int32)
 		B = arr[:,:,2].astype(np.int32)
 		self.province_indices = (R << 16) + (G << 8) + B
+		uniques, inverse = np.unique(self.province_indices, return_inverse=True)
+		self.unique_province_values = uniques.astype(np.int32, copy=False)
+		self.province_palette_inverse = inverse.reshape(self.province_indices.shape).astype(np.int32, copy=False)
 
 		# Clean up heavy RGB array
 		del arr
@@ -13434,21 +13460,18 @@ class Vic3ProvincePainter(tk.Toplevel):
 	def refresh_map(self):
 		if self.province_indices is None: return
 
-		# Get unique colors from the index array
-		uniques = np.unique(self.province_indices)
-
-		# Initialize lookup arrays
-		# Max value 0xFFFFFF = 16777215
-		lookup_r = np.zeros(16777216, dtype=np.uint8)
-		lookup_g = np.zeros(16777216, dtype=np.uint8)
-		lookup_b = np.zeros(16777216, dtype=np.uint8)
+		indices = self.province_indices
 
 		if self.view_mode == "POLITICAL":
-			# Default grey
-			lookup_r[:] = 50; lookup_g[:] = 50; lookup_b[:] = 50
-			default_color = (50, 50, 50)
+			if self.unique_province_values is None or self.province_palette_inverse is None:
+				uniques, inverse = np.unique(indices, return_inverse=True)
+				self.unique_province_values = uniques.astype(np.int32, copy=False)
+				self.province_palette_inverse = inverse.reshape(indices.shape).astype(np.int32, copy=False)
 
-			for packed_rgb in uniques:
+			palette = np.full((len(self.unique_province_values), 3), 50, dtype=np.uint8)
+			default_color = np.array((50, 50, 50), dtype=np.uint8)
+
+			for idx, packed_rgb in enumerate(self.unique_province_values):
 				# Unpack to Hex for lookup
 				r = (packed_rgb >> 16) & 0xFF
 				g = (packed_rgb >> 8) & 0xFF
@@ -13461,22 +13484,20 @@ class Vic3ProvincePainter(tk.Toplevel):
 				if owner:
 					target_col = self.country_colors.get(owner, (150, 150, 150))
 
-				lookup_r[packed_rgb] = target_col[0]
-				lookup_g[packed_rgb] = target_col[1]
-				lookup_b[packed_rgb] = target_col[2]
+				palette[idx] = target_col
+
+			final_img = palette[self.province_palette_inverse]
 
 		else: # PROVINCE MODE
 			# We want to show original province colors, but override selected ones
-
-			# 1. Fill lookup with identity (color = index) for uniques
-			# We can iterate uniques to set the lookup table.
-			for packed_rgb in uniques:
-				r = (packed_rgb >> 16) & 0xFF
-				g = (packed_rgb >> 8) & 0xFF
-				b = packed_rgb & 0xFF
-				lookup_r[packed_rgb] = r
-				lookup_g[packed_rgb] = g
-				lookup_b[packed_rgb] = b
+			if self.province_rgb_image is not None:
+				final_img = self.province_rgb_image.copy()
+			else:
+				final_img = np.dstack((
+					((indices >> 16) & 0xFF).astype(np.uint8),
+					((indices >> 8) & 0xFF).astype(np.uint8),
+					(indices & 0xFF).astype(np.uint8)
+				))
 
 			# 2. Highlight selected
 			for hex_code in self.selected_provinces:
@@ -13484,17 +13505,9 @@ class Vic3ProvincePainter(tk.Toplevel):
 				try:
 					clean = hex_code.replace("x", "")
 					val = int(clean, 16)
-					if val < 16777216:
-						lookup_r[val] = 255
-						lookup_g[val] = 255
-						lookup_b[val] = 255
+					mask = (indices == val)
+					final_img[mask] = (255, 255, 255)
 				except: pass
-
-		out_r = lookup_r[self.province_indices]
-		out_g = lookup_g[self.province_indices]
-		out_b = lookup_b[self.province_indices]
-
-		final_img = np.dstack((out_r, out_g, out_b))
 
 		pil_img = Image.fromarray(final_img)
 		self.display_image = ImageTk.PhotoImage(pil_img)
@@ -13698,7 +13711,11 @@ class Vic3ProvincePainter(tk.Toplevel):
 			self.view_mode = "POLITICAL"
 			self.btn_prov_mode.config(text="Province Selector", bg="#424242")
 			self.btn_export.pack_forget()
-		self.refresh_map()
+		try:
+			self.refresh_map()
+		except Exception as e:
+			self.status_var.set(f"Render Error: {e}")
+			traceback.print_exc()
 
 	def export_selected_provinces(self):
 		if not self.selected_provinces:
