@@ -1535,28 +1535,48 @@ class Vic3Logic:
 								if ao_s:
 									ao_content = cb_inner[ao_s+1:ao_e-1]
 
-									# Cross-state building ownership: region points to a DIFFERENT state.
-									# The upstream c:old_tag -> c:new_tag swap was wrong for this entry -- revert it.
+									# Per-entry cross-state check: process each building sub-entry in ao_content
+									# individually so mixed same-state/cross-state blocks are handled correctly.
+									# Cross-state entries revert the upstream c:old->c:new swap (partial transfer);
+									# same-state entries are already correct from the blanket substitution.
 									if re.search(r"\bbuilding\s*=\s*\{", ao_content):
-										_rgn_m = re.search(r'region\s*=\s*"?(?:s:)?([A-Za-z0-9_]+)"?', ao_content, re.IGNORECASE)
-										_ao_region = _rgn_m.group(1) if _rgn_m else None
-										if _ao_region and _ao_region.upper() != state_name.upper():
-											# Cross-state: preserve verbatim.
-											# For state transfers (not full annex), revert the upstream c:old->c:new swap
-											# since the entity in the cross-state region still belongs to old_tag.
-											# For full annexations, old_tag is absorbed so all its assets pass to
-											# the annexing country -- no revert needed.
-											fixed_ao = ao_content
-											if old_tag and not full_annex:
-												clean_old_rev = old_tag.replace("c:", "").strip()
-												fixed_ao = re.sub(
-													f"c:{re.escape(owner_tag)}",
-													f"c:{clean_old_rev}",
-													ao_content, flags=re.IGNORECASE
-												)
+										_new_ao_parts = []
+										_ao_cur = 0
+										_ao_changed = False
+										_has_same = False
+										while True:
+											_em = re.search(r"\bbuilding\s*=\s*\{", ao_content[_ao_cur:])
+											if not _em:
+												_new_ao_parts.append(ao_content[_ao_cur:])
+												break
+											_e_start = _ao_cur + _em.start()
+											_new_ao_parts.append(ao_content[_ao_cur:_e_start])
+											_es_s, _es_e = self.find_block_content(ao_content, _ao_cur + _em.end() - 1)
+											if _es_s:
+												_sub = ao_content[_e_start:_es_e]
+												_sub_inner = ao_content[_es_s+1:_es_e-1]
+												_rgn_m = re.search(r'region\s*=\s*"?(?:s:)?([A-Za-z0-9_]+)"?', _sub_inner, re.IGNORECASE)
+												_sub_rgn = _rgn_m.group(1) if _rgn_m else None
+												if _sub_rgn and _sub_rgn.upper() != state_name.upper():
+													# Cross-state entry: revert the upstream swap if partial transfer.
+													if old_tag and not full_annex:
+														_clean_old = old_tag.replace("c:", "").strip()
+														_sub = re.sub(f"c:{re.escape(owner_tag)}", f"c:{_clean_old}", _sub, flags=re.IGNORECASE)
+														_ao_changed = True
+												else:
+													_has_same = True
+												_new_ao_parts.append(_sub)
+												_ao_cur = _es_e
+											else:
+												_new_ao_parts.append(ao_content[_e_start:])
+												break
+										if _ao_changed or not _has_same:
+											# Rebuild the block: cross-state entries reverted, same-state entries preserved.
+											# Also fires when all entries are cross-state (no same-state → revert or pass-through).
+											_fixed_ao = "".join(_new_ao_parts)
 											new_ao_block = (
 												f"\n\t\t\t\tadd_ownership = {{"
-												f"{fixed_ao}"
+												f"{_fixed_ao}"
 												f"\n\t\t\t\t}}"
 											)
 											new_cb_inner = cb_inner[:ao_m.start()].rstrip() + new_ao_block + cb_inner[ao_e:]
@@ -1607,7 +1627,19 @@ class Vic3Logic:
 												last_inner_idx = cb_e
 												continue
 										else:
-											# Third-country company or old_tag unknown -> preserve as-is
+											# Third-country or old_tag unknown.
+											# If that company's home country has no states, it is effectively dead — rewrite.
+											if company_country and not self.get_states_owned_by_country(company_country):
+												total_levels_co = sum(int(x) for x in re.findall(r"levels\s*=\s*(\d+)", ao_content)) or 1
+												new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
+												ownership_block = self.get_ownership_block(b_type, owner_tag, total_levels_co, state_name)
+												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
+												new_inner_parts.append(new_cb_block)
+												inner_modified = True
+												inner_cursor = cb_e
+												last_inner_idx = cb_e
+												continue
+											# Third-country company with living owner — preserve as-is
 											new_ao_block = (
 												f"\n\t\t\t\tadd_ownership = {{"
 												f"{ao_content.rstrip()}"
@@ -1673,19 +1705,24 @@ class Vic3Logic:
 													# old_tag has no states left -> company disbanded, rewrite to self-ownership
 													should_rewrite = True
 											else:
-												# Company belongs to a third country (not old_tag) -> preserve as-is
-												new_ao_block = (
-													f"\n\t\t\t\tadd_ownership = {{"
-													f"{consolidated.rstrip()}"
-													f"\n\t\t\t\t}}"
-												)
-												new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
-												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
-												new_inner_parts.append(new_cb_block)
-												inner_modified = True
-												inner_cursor = cb_e
-												last_inner_idx = cb_e
-												continue
+												# Third-country company (not old_tag).
+												# If that company's home country has no states, it is dead — rewrite.
+												if company_country and not self.get_states_owned_by_country(company_country):
+													should_rewrite = True
+												else:
+													# Living third-country company — preserve as-is
+													new_ao_block = (
+														f"\n\t\t\t\tadd_ownership = {{"
+														f"{consolidated.rstrip()}"
+														f"\n\t\t\t\t}}"
+													)
+													new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
+													new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
+													new_inner_parts.append(new_cb_block)
+													inner_modified = True
+													inner_cursor = cb_e
+													last_inner_idx = cb_e
+													continue
 
 										# Rule 3: Country-owned building — if owned by the state owner, change with state;
 										# if owned by an uninvolved third country, preserve their ownership.
@@ -1800,25 +1837,39 @@ class Vic3Logic:
 				if pm:
 					ps, pe = self.find_block_content(old_c, pm.end() - 1)
 					if ps is not None:
-						provinces = old_c[ps+1:pe-1].strip()
+						provinces = re.sub(r'[ \t]+', ' ', old_c[ps+1:pe-1].strip())
 						new_c = content[new_range[0]:new_range[1]]
 						if "owned_provinces" in new_c:
 							npm = re.search(r"owned_provinces\s*=\s*\{", new_c)
 							ns, ne = self.find_block_content(new_c, npm.end()-1)
-							# Detect indentation from existing province content
-							prov_lines = new_c[ns+1:ne-1].split('\n')
-							prov_indent = "\t\t\t\t\t"
-							for line in prov_lines:
-								if line.strip():
-									prov_indent = re.match(r'^(\s*)', line).group(1)
-									break
-							# Detect closing brace indentation
-							close_indent = "\t\t\t\t"
-							before_close = new_c[:ne-1]
-							last_nl = before_close.rfind('\n')
-							if last_nl >= 0 and not before_close[last_nl+1:].strip():
-								close_indent = before_close[last_nl+1:]
-							new_c = new_c[:ne-1].rstrip() + f"\n{prov_indent}{provinces}\n{close_indent}" + new_c[ne-1:]
+							inner = new_c[ns+1:ne-1]
+							if '\n' in inner:
+								# Multi-line: detect indentation from existing province lines
+								prov_indent = "\t\t\t\t\t"
+								for line in inner.split('\n'):
+									if line.strip():
+										prov_indent = re.match(r'^(\s*)', line).group(1)
+										break
+								# Detect closing brace indentation from whitespace before }
+								close_indent = "\t\t\t\t"
+								before_close = new_c[:ne-1]
+								last_nl = before_close.rfind('\n')
+								if last_nl >= 0 and not before_close[last_nl+1:].strip():
+									close_indent = before_close[last_nl+1:]
+								new_c = new_c[:ne-1].rstrip() + f"\n{prov_indent}{provinces}\n{close_indent}" + new_c[ne-1:]
+							else:
+								# Inline format: convert to multi-line, inferring indentation from 'country' line
+								country_m = re.search(r'^(\s*)country\s*=', new_c, re.MULTILINE)
+								if country_m:
+									base_indent = country_m.group(1)
+									prov_indent = base_indent + '\t'
+									close_indent = base_indent
+								else:
+									prov_indent = "\t\t\t\t\t"
+									close_indent = "\t\t\t\t"
+								existing = inner.strip()
+								new_block = f"\n{prov_indent}{existing}\n{prov_indent}{provinces}\n{close_indent}"
+								new_c = new_c[:ns+1] + new_block + new_c[ne-1:]
 						else:
 							lb = new_c.rfind('}')
 							new_c = new_c[:lb] + f"\n\t\towned_provinces = {{\n\t\t\t{provinces}\n\t\t}}\n" + new_c[lb:]
@@ -1839,14 +1890,17 @@ class Vic3Logic:
 			return self.sanitize_block_content(content, state_name, old_tag, new_tag, (folder == "buildings"))
 
 	def _detect_owners(self, block_content, folder):
-		owners = set()
+		seen = set()
+		owners = []
 		if folder == "states":
 			matches = re.findall(r"country\s*=\s*c:([A-Za-z0-9_]+)", block_content)
-			owners.update(matches)
 		else:
 			matches = re.findall(r"region_state:([A-Za-z0-9_]+)", block_content)
-			owners.update(matches)
-		return list(owners)
+		for m in matches:
+			if m not in seen:
+				seen.add(m)
+				owners.append(m)
+		return owners
 
 	def transfer_ownership_batch(self, state_list, old_owners, new_tag):
 		# Auto-backup handled by caller or usually this is part of a larger operation like Create Country
@@ -2883,7 +2937,11 @@ class Vic3Logic:
 				# Fallback: Scan ALL tags
 				self.clean_military_smart(None, new_tag, reg, states, force_move=False, dest_home_state=home_state)
 
-		# 3. Prune Orphans
+		# 3. Fix set_capital for donors that lost their capital state
+		if target_owners:
+			self.fix_set_capital_after_transfer(target_owners, states_clean)
+
+		# 4. Prune Orphans
 		if prune_refs:
 			self.log("--- Validating Character Links ---")
 			valid_scopes = self.collect_valid_scopes()
@@ -3737,13 +3795,11 @@ class Vic3Logic:
 		# Note: common/character_templates* -> is_recursive=True
 
 		items = [
-			("localization/english/countries_l_english.yml", False),
 			# ("common/buildings", True),
 			# ("common/character_templates", True),
 			# ("common/coat_of_arms", True),
 			("common/country_definitions", True),
 			# ("common/cultures", True),
-			("common/strategic_regions", True),
 			("common/history/buildings", True),
 			# ("common/history/characters", True),
 			("common/history/countries", True),
@@ -3756,12 +3812,14 @@ class Vic3Logic:
 			("common/history/treaties", True),
 			("common/history/power_blocs", True),
 			("common/history/lobbies/00_lobbies.txt", False),
-			("common/religions", True),
-			("common/scripted_effects", True)
-			("common/scripted_triggers", True)
 			("common/journal_entries", True),
 			("common/laws", True),
+			("common/religions", True),
+			# ("common/scripted_effects", True),
+			# ("common/scripted_triggers", True),
+			("common/strategic_regions", True),
 			("common/technology/technologies", True),
+			("localization/english/countries_l_english.yml", False),
 			("map_data", True)
 			# ("gfx/map/map_object_data", True)
 		]
@@ -4387,11 +4445,16 @@ class Vic3Logic:
 
 		# Reconstruct members
 		members_list = data.get("members", [])
-		# User requested NOT to auto-add leader as member, so we filter it out if present
-		filtered_members = [
-			m for m in members_list
-			if m.replace("c:", "").strip() != clean_tag
-		]
+		# Filter out the leader and any member that no longer owns states (would crash Vic3 at load).
+		filtered_members = []
+		for m in members_list:
+			m_clean = m.replace("c:", "").strip()
+			if m_clean.upper() == clean_tag.upper():
+				continue  # Never list the leader as its own member
+			if not self.get_states_owned_by_country(m_clean):
+				self.log(f"[PB] Dropping stateless member c:{m_clean} from bloc '{data.get('loc_name', clean_tag)}'.", 'warn')
+				continue
+			filtered_members.append(m)
 
 		members_str = "\n\t\t\t".join([f"member = {m}" for m in filtered_members])
 
@@ -4436,7 +4499,12 @@ class Vic3Logic:
 			new_inner = create_block + extra_block + "\n"
 			new_block = f"c:{clean_tag} ?= {{{new_inner}\t}}"
 
-			content = content[:s] + new_block + content[e:]
+			# get_block_range_safe returns match.start() which sits on the leading \s
+			# character before "c:TAG".  Slicing at [s] would consume that character and
+			# merge the preceding comment line with the replacement block.
+			# Advance past it so the surrounding whitespace is left intact.
+			actual_s = s + 1 if (s < len(content) and content[s] in ' \t\r\n') else s
+			content = content[:actual_s] + new_block + content[e:]
 
 		else:
 			# Create new country block inside POWER_BLOCS
@@ -4476,7 +4544,8 @@ class Vic3Logic:
 
 				s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
 				if s is not None:
-					content = content[:s] + content[e:]
+					actual_s = s + 1 if (s < len(content) and content[s] in ' \t\r\n') else s
+					content = content[:actual_s] + content[e:]
 					with open(path, 'w', encoding='utf-8-sig') as f:
 						f.write(content)
 					self.log(f"[REMOVE] Power Bloc removed for {clean_tag}", 'success')
@@ -4604,11 +4673,12 @@ class Vic3Logic:
 					new_content = content
 					file_changed = False
 					
+					# Pass 1: update company_type = { country = c:source } blocks (company history files)
 					cursor = 0
 					while True:
 						m = re.search(r"company_type\s*=\s*\{", new_content[cursor:])
 						if not m: break
-						
+
 						s, e = self.find_block_content(new_content, cursor + m.end() - 1)
 						if s:
 							block = new_content[s:e]
@@ -4621,7 +4691,30 @@ class Vic3Logic:
 								cursor = e
 						else:
 							cursor = cursor + m.end()
-							
+
+					# Pass 2: update add_ownership = { company = { country = c:source } } blocks (building files).
+					# These are left stale after partial state transfers when the company owner is later fully annexed.
+					cursor = 0
+					while True:
+						m2 = re.search(r"\badd_ownership\s*=\s*\{", new_content[cursor:])
+						if not m2: break
+						ao_s, ao_e = self.find_block_content(new_content, cursor + m2.end() - 1)
+						if ao_s:
+							ao_block = new_content[ao_s:ao_e]
+							pat = re.compile(
+								r"(\bcompany\s*=\s*\{[^}]*?country\s*=\s*c:)" + re.escape(clean_source) + r"\b",
+								re.IGNORECASE | re.DOTALL
+							)
+							if pat.search(ao_block):
+								new_ao = pat.sub(r"\g<1>" + clean_target, ao_block)
+								new_content = new_content[:ao_s] + new_ao + new_content[ao_e:]
+								file_changed = True
+								cursor = ao_s + len(new_ao)
+							else:
+								cursor = ao_e
+						else:
+							cursor = cursor + m2.end()
+
 					if file_changed:
 						with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 						self.log(f"   [UPDATE] Transferred companies in {file}")
@@ -4674,7 +4767,7 @@ class Vic3Logic:
 				if file_changed:
 					with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
 
-	def clean_transferred_state_references(self, transferred_states):
+	def clean_transferred_state_references(self, transferred_states, new_tag=None):
 		"""
 		Repatriates invalid ownership references in building files that point to transferred states.
 		E.g. Change: region="TRANSFERRED_STATE" -> region="LOCAL_STATE"
@@ -4828,23 +4921,30 @@ class Vic3Logic:
 
 														# Check if region is bad
 														if bad_region_re.search(entry_inner):
-															# Only fix same-state ownership (region == local_state with a stale name).
-															# Cross-state ownership (region is a different state) is valid — preserve it.
+															# This ownership entry references a transferred state.
+															# Same-state: building is INSIDE the transferred state.
+															#   transfer_ownership_batch already updated country via blanket sub — preserve as-is.
+															# Cross-state: building is in a DIFFERENT state, ownership region was transferred.
+															#   Update country to new owner of the transferred region; keep region unchanged.
 															region_m = re.search(r'region\s*=\s*"?([A-Za-z0-9_]+)"?', entry_inner)
 															entry_region = region_m.group(1) if region_m else None
 															if entry_region and entry_region.upper() == local_state.upper():
-																# Same-state stale reference — update the region value
-																new_entry = re.sub(
-																	r'region\s*=\s*"[^"]*"',
-																	f'region = "{local_state}"',
-																	entry_block
-																)
-																new_ao_parts.append(new_entry)
-																ao_modified = True
-																file_modified = True
-															else:
-																# Cross-state ownership — do not modify
+																# Same-state: transfer_ownership_batch already handled this. Preserve as-is.
 																new_ao_parts.append(entry_block)
+															else:
+																# Cross-state: update country to new owner of transferred region; keep region.
+																if new_tag:
+																	clean_new_tag = new_tag.replace("c:", "").strip()
+																	new_entry = re.sub(
+																		r'country\s*=\s*"?c:[A-Za-z0-9_]+"?',
+																		f'country = "c:{clean_new_tag}"',
+																		entry_block
+																	)
+																	new_ao_parts.append(new_entry)
+																	ao_modified = True
+																	file_modified = True
+																else:
+																	new_ao_parts.append(entry_block)
 														else:
 															new_ao_parts.append(entry_block)
 
@@ -7261,6 +7361,114 @@ class Vic3Logic:
 					data['members'] = new_members
 					self.save_power_bloc_data(leader, data)
 
+	def fix_set_capital_after_transfer(self, old_owners, transferred_states):
+		"""
+		After transferring states away from one or more countries, check each donor's
+		history/countries file for a `set_capital` that now points to a transferred
+		(no longer owned) state.  If found:
+		  - Country still has states  → replace with the first remaining state.
+		  - Country has no states     → remove the set_capital line entirely.
+		`transferred_states` should be a list of normalised STATE_XXX keys (no s: prefix).
+		"""
+		if not transferred_states or not old_owners:
+			return
+
+		# Normalise the transferred set for fast lookup (uppercase, strip s: prefix).
+		clean_transferred = set()
+		for s in transferred_states:
+			k = s.strip().upper()
+			if k.startswith("S:"):
+				k = k[2:]
+			if not k.startswith("STATE_"):
+				k = "STATE_" + k
+			clean_transferred.add(k)
+
+		hist_dir = os.path.join(self.mod_path, "common/history/countries")
+		if not os.path.exists(hist_dir):
+			return
+
+		# Pattern matches: set_capital = s:STATE_X  or  set_capital = STATE_X  (with optional quotes)
+		cap_re = re.compile(
+			r'(set_capital\s*=\s*"?(?:s:)?(STATE_[A-Za-z0-9_]+)"?)',
+			re.IGNORECASE
+		)
+
+		for old_tag in old_owners:
+			clean_old = old_tag.replace("c:", "").strip().upper()
+
+			for root, _, files in os.walk(hist_dir):
+				for file in files:
+					if not file.endswith(".txt"):
+						continue
+					fpath = os.path.join(root, file)
+					try:
+						with open(fpath, 'r', encoding='utf-8-sig') as f:
+							content = f.read()
+					except:
+						with open(fpath, 'r', encoding='utf-8') as f:
+							content = f.read()
+
+					# Only bother with files that mention this country and set_capital
+					if not re.search(r"c:" + re.escape(clean_old) + r"\b", content, re.IGNORECASE):
+						continue
+					if not cap_re.search(content):
+						continue
+
+					changed = False
+					new_content = content
+
+					# Walk every c:old_tag block in the file
+					idx = 0
+					while True:
+						s, e = self.get_block_range_safe(new_content, f"c:{clean_old}", idx)
+						if s is None:
+							break
+
+						block = new_content[s:e]
+						m = cap_re.search(block)
+						if not m:
+							idx = e
+							continue
+
+						cap_state = m.group(2).upper()   # e.g. STATE_ILE_DE_FRANCE
+						if cap_state not in clean_transferred:
+							idx = e
+							continue
+
+						# Capital was in a transferred state — need to fix it.
+						remaining = self.get_all_owned_states(clean_old)
+						# Normalise remaining list
+						remaining_clean = []
+						for rs in remaining:
+							rk = rs.strip().upper()
+							if rk.startswith("S:"):
+								rk = rk[2:]
+							if not rk.startswith("STATE_"):
+								rk = "STATE_" + rk
+							remaining_clean.append(rk)
+
+						# Remove the transferred state itself from remaining (race condition guard)
+						remaining_clean = [r for r in remaining_clean if r not in clean_transferred]
+
+						if remaining_clean:
+							new_cap = remaining_clean[0]
+							new_block = cap_re.sub(f"set_capital = s:{new_cap}", block, count=1)
+							self.log(f"[CAP] c:{clean_old}: set_capital {cap_state} → {new_cap}", 'info')
+						else:
+							# Country has no states left — drop the set_capital line entirely
+							new_block = cap_re.sub("", block, count=1)
+							# Clean up any blank line left behind
+							new_block = re.sub(r'\n[ \t]*\n', '\n', new_block)
+							self.log(f"[CAP] c:{clean_old}: removed set_capital {cap_state} (no remaining states)", 'warn')
+
+						new_content = new_content[:s] + new_block + new_content[e:]
+						changed = True
+						idx = s + len(new_block)
+
+					if changed:
+						with open(fpath, 'w', encoding='utf-8-sig') as f:
+							f.write(new_content)
+
 	def perform_annexation_cleanup(self, old_tag, new_tag, transferred_states):
 		self.log(f"--- Performing Annexation Cleanup: {old_tag} -> {new_tag} ---", 'info')
 		self.cleanup_trade_routes(old_tag)
@@ -7268,7 +7476,8 @@ class Vic3Logic:
 		self.update_companies(old_tag, new_tag)
 		self.update_military_formations(old_tag, new_tag)
 		self.cleanup_power_bloc_membership(old_tag)
-		self.clean_transferred_state_references(transferred_states)
+		self.fix_set_capital_after_transfer([old_tag], transferred_states)
+		self.clean_transferred_state_references(transferred_states, new_tag=new_tag)
 		self.sanitize_buildings(old_tag, new_tag, transferred_states)
 		self.clean_lobbies_for_annexed(old_tag)
 
@@ -13446,7 +13655,7 @@ class Vic3ProvincePainter(tk.Toplevel):
 					deferred_cleanups[old]["new"] = new
 				else:
 					# Even if not full annexation, we should clean references for these specific states
-					self.logic.clean_transferred_state_references(state_list)
+					self.logic.clean_transferred_state_references(state_list, new_tag=new)
 
 				count += 1
 
