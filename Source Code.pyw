@@ -996,6 +996,39 @@ class Vic3Logic:
 						continue
 		return None
 
+	def get_character_home_region(self, template_name):
+		"""Look up home_region for a character template from common/character_templates/."""
+		if not template_name:
+			return None
+		paths = []
+		if self.mod_path: paths.append(os.path.join(self.mod_path, "common/character_templates"))
+		if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/character_templates"))
+		for path in paths:
+			if not os.path.exists(path): continue
+			for root, _, files in os.walk(path):
+				for file in files:
+					if not file.endswith(".txt"): continue
+					try:
+						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as fh:
+							fc = fh.read()
+					except:
+						try:
+							with open(os.path.join(root, file), 'r', encoding='utf-8') as fh:
+								fc = fh.read()
+						except:
+							continue
+					fc_clean = re.sub(r'#.*', '', fc)
+					if template_name not in fc_clean: continue
+					tm = re.search(re.escape(template_name) + r'\s*=\s*\{', fc_clean)
+					if not tm: continue
+					s_idx, e_idx = self.find_block_content(fc_clean, tm.end() - 1)
+					if s_idx is None: continue
+					block = fc_clean[s_idx:e_idx]
+					hr_m = re.search(r'home_region\s*=\s*([A-Za-z0-9_]+)', block)
+					if hr_m:
+						return hr_m.group(1).strip()
+		return None
+
 	def get_states_in_region(self, region_name):
 		"""Parses common/strategic_regions to find states in a region."""
 		clean_region = region_name.replace("sr:", "").strip()
@@ -2185,95 +2218,174 @@ class Vic3Logic:
 
 				cursor = f_end
 
-			# --- General relocation (rules 2 & 3) ---
-			if emptied_formation_scopes:
-				inner_reconstructed = "".join(new_inner_parts)
+			# --- General/Admiral relocation (1.13+) ---
+			inner_reconstructed = "".join(new_inner_parts)
 
-				# Count generals currently linked to each formation (from original inner_body)
-				gen_count = {}
-				for fm_sc in re.findall(r"transfer_to_formation\s*=\s*scope:([A-Za-z0-9_]+)", inner_body, re.IGNORECASE):
-					gen_count[fm_sc] = gen_count.get(fm_sc, 0) + 1
+			# Check if source country still exists after transfers
+			remaining_states = self.get_all_owned_states(found_tag) if found_tag else ["placeholder"]
+			country_ceases = not bool(remaining_states)
 
-				# Find available (non-emptied, still has combat_unit) formations in reconstructed block
-				available = {}  # scope -> type
-				fi_c = 0
+			if country_ceases:
+				# Case 3: source country no longer exists
+				# Build formation type map from original inner_body
+				fm_type_map = {}
+				fm_scan_c = 0
 				while True:
-					fi_m2 = re.search(r"create_military_formation\s*=\s*\{", inner_reconstructed[fi_c:])
-					if not fi_m2: break
-					fi_abs2 = fi_c + fi_m2.start()
-					fi_s2, fi_e2 = self.find_block_content(inner_reconstructed, fi_c + fi_m2.end() - 1)
-					if fi_s2 is None: break
-					fi_blk2 = inner_reconstructed[fi_abs2:fi_e2]
-					sc_m2 = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_blk2)
-					ty_m2 = re.search(r"\btype\s*=\s*(\w+)", fi_blk2)
-					if sc_m2 and ty_m2 and "combat_unit" in fi_blk2:
-						sc2 = sc_m2.group(1)
-						if sc2 not in emptied_formation_scopes:
-							available[sc2] = ty_m2.group(1).lower()
-					fi_c = fi_e2
+					fm_m = re.search(r"create_military_formation\s*=\s*\{", inner_body[fm_scan_c:])
+					if not fm_m: break
+					fm_abs = fm_scan_c + fm_m.start()
+					fm_bs, fm_be = self.find_block_content(inner_body, fm_scan_c + fm_m.end() - 1)
+					if fm_bs is None: break
+					fm_blk = inner_body[fm_abs:fm_be]
+					sc_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fm_blk)
+					ty_m = re.search(r"\btype\s*=\s*(army|fleet)\b", fm_blk, re.IGNORECASE)
+					if sc_m and ty_m:
+						fm_type_map[sc_m.group(1)] = ty_m.group(1).lower()
+					fm_scan_c = fm_be
 
-				for emptied_scope, emptied_type in emptied_formation_scopes.items():
-					gen_link_pat = re.compile(
-						r"scope:([A-Za-z0-9_]+)\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:"
-						+ re.escape(emptied_scope) + r"\b[^}]*\}",
-						re.IGNORECASE | re.DOTALL
+				# Scan all create_character blocks in original inner_body
+				clean_new_tag = new_tag.upper().replace("C:", "").strip()
+				cc_cursor = 0
+				while True:
+					cc_m = re.search(r"create_character\s*=\s*\{", inner_body[cc_cursor:], re.IGNORECASE)
+					if not cc_m: break
+					cc_abs = cc_cursor + cc_m.start()
+					cc_bs, cc_be = self.find_block_content(inner_body, cc_cursor + cc_m.end() - 1)
+					if cc_bs is None: break
+					char_block = inner_body[cc_abs:cc_be]
+
+					gen_scope_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", char_block, re.IGNORECASE)
+					if not gen_scope_m:
+						cc_cursor = cc_be
+						continue
+					gen_scope = gen_scope_m.group(1)
+
+					# Get home_region: check block directly, then template
+					home_region = None
+					hr_direct = re.search(r"home_region\s*=\s*([A-Za-z0-9_]+)", char_block, re.IGNORECASE)
+					if hr_direct:
+						home_region = hr_direct.group(1).strip()
+					else:
+						tpl_m = re.search(r"template\s*=\s*([A-Za-z0-9_]+)", char_block, re.IGNORECASE)
+						if tpl_m:
+							home_region = self.get_character_home_region(tpl_m.group(1))
+
+					if not home_region:
+						self.log(f"      [GEN] scope:{gen_scope} has no home_region - manual fix needed", 'warn')
+						cc_cursor = cc_be
+						continue
+
+					norm_hr = self.normalize_state_key(home_region)
+
+					# Find current owner of home_region after transfers
+					hr_owners = self.scan_state_region_owners(norm_hr)
+					dest_country = None
+					if clean_new_tag in [o.upper() for o in hr_owners]:
+						dest_country = clean_new_tag
+					elif hr_owners:
+						dest_country = hr_owners[0].upper()
+
+					# Determine formation type from the transfer_to_formation link
+					link_m = re.search(
+						r"scope:" + re.escape(gen_scope) + r"\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:([A-Za-z0-9_]+)",
+						inner_body, re.IGNORECASE | re.DOTALL
 					)
-					for glm in gen_link_pat.finditer(inner_body):
-						gen_scope = glm.group(1)
+					char_type = "army"
+					if link_m:
+						char_type = fm_type_map.get(link_m.group(1), "army")
 
-						# Rule 2: another formation of same type with < 4 generals
-						target_scope = None
-						for av_sc, av_type in available.items():
-							if av_type == emptied_type and gen_count.get(av_sc, 0) < 4:
-								target_scope = av_sc
-								gen_count[target_scope] = gen_count.get(target_scope, 0) + 1
-								break
+					# Remove create_character block from inner_reconstructed
+					ir_c2 = 0
+					while True:
+						ir_m2 = re.search(r"create_character\s*=\s*\{", inner_reconstructed[ir_c2:], re.IGNORECASE)
+						if not ir_m2: break
+						ir_abs2 = ir_c2 + ir_m2.start()
+						ir_bs2, ir_be2 = self.find_block_content(inner_reconstructed, ir_c2 + ir_m2.end() - 1)
+						if ir_bs2 is None: break
+						if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b",
+								inner_reconstructed[ir_abs2:ir_be2], re.IGNORECASE):
+							inner_reconstructed = inner_reconstructed[:ir_abs2] + inner_reconstructed[ir_be2:]
+							break
+						ir_c2 = ir_be2
 
-						if target_scope:
-							inner_reconstructed = re.sub(
-								r"(scope:" + re.escape(gen_scope) + r"\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:)"
-								+ re.escape(emptied_scope) + r"\b",
-								r"\g<1>" + target_scope,
-								inner_reconstructed, count=1, flags=re.IGNORECASE | re.DOTALL
-							)
-							self.log(f"      [GEN] scope:{gen_scope} -> scope:{target_scope} (same country, rule 2)")
+					# Remove scope:gen_scope = { transfer_to_formation = ... } link
+					sl_m = re.search(r"scope:" + re.escape(gen_scope) + r"\s*=\s*\{",
+							inner_reconstructed, re.IGNORECASE)
+					if sl_m:
+						sl_bs, sl_be = self.find_block_content(inner_reconstructed, sl_m.end() - 1)
+						if sl_bs is not None:
+							inner_reconstructed = inner_reconstructed[:sl_m.start()] + inner_reconstructed[sl_be:]
+
+					if dest_country == clean_new_tag:
+						if char_type == "fleet":
+							stolen_generals_fleet.append((char_block, gen_scope))
 						else:
-							# Rule 3: general follows troops to new country
-							cc_c = 0
-							while True:
-								cc_m2 = re.search(r"create_character\s*=\s*\{", inner_body[cc_c:], re.IGNORECASE)
-								if not cc_m2: break
-								cc_abs2 = cc_c + cc_m2.start()
-								cc_s2, cc_e2 = self.find_block_content(inner_body, cc_c + cc_m2.end() - 1)
-								if cc_s2 is None: break
-								char_block = inner_body[cc_abs2:cc_e2]
-								if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b", char_block):
-									if emptied_type == "army": stolen_generals_army.append((char_block, gen_scope))
-									else: stolen_generals_fleet.append((char_block, gen_scope))
-									# Remove create_character from reconstructed content
-									ir_c = 0
-									while True:
-										ir_m = re.search(r"create_character\s*=\s*\{", inner_reconstructed[ir_c:], re.IGNORECASE)
-										if not ir_m: break
-										ir_abs = ir_c + ir_m.start()
-										ir_s, ir_e = self.find_block_content(inner_reconstructed, ir_c + ir_m.end() - 1)
-										if ir_s is None: break
-										if re.search(r"save_scope_as\s*=\s*" + re.escape(gen_scope) + r"\b", inner_reconstructed[ir_abs:ir_e]):
-											inner_reconstructed = inner_reconstructed[:ir_abs] + inner_reconstructed[ir_e:]
-											break
-										ir_c = ir_e
-									# Remove scope:gen = { transfer_to_formation = ... } link
-									sl_m = re.search(r"scope:" + re.escape(gen_scope) + r"\s*=\s*\{", inner_reconstructed, re.IGNORECASE)
-									if sl_m:
-										sl_s, sl_e = self.find_block_content(inner_reconstructed, sl_m.end() - 1)
-										if sl_s is not None:
-											inner_reconstructed = inner_reconstructed[:sl_m.start()] + inner_reconstructed[sl_e:]
-									self.log(f"      [GEN] scope:{gen_scope} follows troops to c:{new_tag} (rule 3)")
-									break
-								cc_c = cc_e2
+							stolen_generals_army.append((char_block, gen_scope))
+						self.log(f"      [GEN] scope:{gen_scope} transferred to c:{new_tag} (home_region={home_region})")
+						files_modified = True
+					elif dest_country:
+						self.log(f"      [GEN] scope:{gen_scope} home_region={home_region} owned by {dest_country} (not {clean_new_tag}) - manual fix needed", 'warn')
+					else:
+						self.log(f"      [GEN] scope:{gen_scope} home_region={home_region} has no known owner - manual fix needed", 'warn')
+
+					cc_cursor = cc_be
+
+			else:
+				# Cases 1 & 2: country still exists
+				if emptied_formation_scopes:
+					# Case 2: some formations were emptied; reassign general/admiral to a surviving formation
+					# Find surviving formations with troops/ships in inner_reconstructed
+					surviving_army = []
+					surviving_fleet = []
+					fi_c = 0
+					while True:
+						fi_m2 = re.search(r"create_military_formation\s*=\s*\{", inner_reconstructed[fi_c:])
+						if not fi_m2: break
+						fi_abs2 = fi_c + fi_m2.start()
+						fi_s2, fi_e2 = self.find_block_content(inner_reconstructed, fi_c + fi_m2.end() - 1)
+						if fi_s2 is None: break
+						fi_blk2 = inner_reconstructed[fi_abs2:fi_e2]
+						sc_m2 = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_blk2)
+						ty_m2 = re.search(r"\btype\s*=\s*(army|fleet)\b", fi_blk2, re.IGNORECASE)
+						if sc_m2 and ty_m2:
+							sc2 = sc_m2.group(1)
+							fm_type2 = ty_m2.group(1).lower()
+							if sc2 not in emptied_formation_scopes:
+								has_units = ("combat_unit" in fi_blk2) if fm_type2 == "army" else bool(re.search(r"(?<!\w)ship\s*=\s*\{", fi_blk2))
+								if has_units:
+									if fm_type2 == "army":
+										surviving_army.append(sc2)
+									else:
+										surviving_fleet.append(sc2)
+						fi_c = fi_e2
+
+					for emptied_scope, emptied_type in emptied_formation_scopes.items():
+						gen_link_pat = re.compile(
+							r"scope:([A-Za-z0-9_]+)\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:"
+							+ re.escape(emptied_scope) + r"\b[^}]*\}",
+							re.IGNORECASE | re.DOTALL
+						)
+						for glm in gen_link_pat.finditer(inner_body):
+							gen_scope = glm.group(1)
+							survivors = surviving_army if emptied_type == "army" else surviving_fleet
+							if survivors:
+								target_scope = survivors[0]
+								inner_reconstructed = re.sub(
+									r"(scope:" + re.escape(gen_scope) + r"\s*=\s*\{[^}]*transfer_to_formation\s*=\s*scope:)"
+									+ re.escape(emptied_scope) + r"\b",
+									r"\g<1>" + target_scope,
+									inner_reconstructed, count=1, flags=re.IGNORECASE | re.DOTALL
+								)
+								self.log(f"      [GEN] scope:{gen_scope} reassigned to scope:{target_scope} (case 2)")
+							else:
+								self.log(f"      [GEN] scope:{gen_scope} has no surviving {emptied_type} formation - manual fix needed", 'warn')
 
 				new_inner_parts = [inner_reconstructed]
 				emptied_formation_scopes.clear()
+
+			# Always sync new_inner_parts to inner_reconstructed (handles case 3 path)
+			new_inner_parts = [inner_reconstructed]
+			emptied_formation_scopes.clear()
 
 			processed_file_parts.append(header + "".join(new_inner_parts) + footer)
 			last_idx = c_end
