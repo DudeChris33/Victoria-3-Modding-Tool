@@ -591,6 +591,10 @@ class Vic3Logic:
 	def ensure_country_history_exists(self, new_tag, donor_tag, target_states=None):
 		hist_dir = os.path.join(self.mod_path, "common/history/countries")
 		clean_new = new_tag.replace("c:", "").strip().upper()
+		tag_pattern = re.compile(
+			r"(?:^|\s)c:" + re.escape(clean_new) + r"\b\s*(?:\?=|:|=)\s*\{",
+			re.IGNORECASE
+		)
 
 		# Check if file exists
 		if os.path.exists(hist_dir):
@@ -605,7 +609,7 @@ class Vic3Logic:
 						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 
-					if re.search(r"(?:^|\s)c:" + re.escape(clean_new) + r"(\?=|:|=)", content):
+					if tag_pattern.search(content):
 						return # Exists
 
 		self.log(f"[INFO] History file for {clean_new} missing. Creating from {donor_tag}...", 'info')
@@ -1427,6 +1431,90 @@ class Vic3Logic:
 
 		return "\n".join(lines)
 
+	def normalize_state_scope(self, scope):
+		if not scope:
+			return None
+		return scope.replace('"', '').replace("s:", "").strip().upper()
+
+	def parse_ownership_entries(self, content):
+		entries = []
+		cursor = 0
+		while True:
+			m = re.search(r"(building|country|company)\s*=\s*\{", content[cursor:], re.IGNORECASE)
+			if not m:
+				break
+
+			abs_start = cursor + m.start()
+			s, e = self.find_block_content(content, cursor + m.end() - 1)
+			if s is None:
+				break
+
+			block_text = content[abs_start:e]
+			inner = content[s+1:e-1]
+			country_m = re.search(r'country\s*=\s*"?c:([A-Za-z0-9_]+)"?', inner, re.IGNORECASE)
+			region_m = re.search(r'region\s*=\s*"?((?:s:)?[A-Za-z0-9_]+)"?', inner, re.IGNORECASE)
+			levels_m = re.search(r'levels\s*=\s*(\d+)', inner, re.IGNORECASE)
+			entries.append({
+				"wrapper": m.group(1).lower(),
+				"text": block_text,
+				"inner": inner,
+				"country": country_m.group(1).upper() if country_m else None,
+				"region": self.normalize_state_scope(region_m.group(1)) if region_m else None,
+				"levels": int(levels_m.group(1)) if levels_m else 1,
+			})
+			cursor = e
+
+		return entries
+
+	def build_add_ownership_block(self, entry_texts):
+		content = "".join(entry_texts).strip()
+		return (
+			f"\n\t\t\t\tadd_ownership = {{"
+			f"\n\t\t\t\t\t{content}"
+			f"\n\t\t\t\t}}"
+		)
+
+	def rebuild_create_building_block(self, prefix, cb_inner, add_ownership_block=None):
+		working = cb_inner
+		existing_ao = None
+		reserves_text = None
+		apm_text = None
+		spans = []
+
+		ao_m = re.search(r"\badd_ownership\s*=\s*\{", working)
+		if ao_m:
+			ao_s, ao_e = self.find_block_content(working, ao_m.end() - 1)
+			if ao_s is not None:
+				existing_ao = working[ao_m.start():ao_e].strip()
+				spans.append((ao_m.start(), ao_e))
+
+		r_m = re.search(r"(?:^|\n)([ \t]*reserves\s*=\s*[^\n]+)", working)
+		if r_m:
+			reserves_text = r_m.group(1).strip()
+			spans.append((r_m.start(1), r_m.end(1)))
+
+		apm_m = re.search(r"\bactivate_production_methods\s*=\s*\{", working)
+		if apm_m:
+			apm_s, apm_e = self.find_block_content(working, apm_m.end() - 1)
+			if apm_s is not None:
+				apm_text = working[apm_m.start():apm_e].strip()
+				spans.append((apm_m.start(), apm_e))
+
+		for start, end in sorted(spans, reverse=True):
+			working = working[:start] + working[end:]
+
+		parts = [working.rstrip()]
+		final_ao = add_ownership_block.strip() if add_ownership_block else (existing_ao.strip() if existing_ao else None)
+		if final_ao:
+			parts.append(final_ao)
+		if reserves_text:
+			parts.append(reserves_text)
+		if apm_text:
+			parts.append(apm_text)
+
+		new_inner = "\n\t\t\t\t".join(p for p in parts if p and p.strip())
+		return prefix + new_inner.rstrip() + "\n\t\t\t}"
+
 	def fix_building_ownership(self, block_content, owner_tag, state_name, old_tag=None, full_annex=False):
 		"""Ensures all create_building blocks in the target region have explicit ownership."""
 
@@ -1480,25 +1568,12 @@ class Vic3Logic:
 
 						# SKIP Subsistence Farms and other auto-managed buildings to prevent crashes
 						if b_type in ["building_subsistence_farms", "building_urban_center", "building_trade_center"]:
-							# Preserve ownership as-is but enforce canonical field order:
-							# activate_production_methods must come after reserves (and after add_ownership)
-							_apm = re.search(r"\bactivate_production_methods\s*=\s*\{", cb_inner)
-							if _apm:
-								_apm_s, _apm_e = self.find_block_content(cb_inner, _apm.end() - 1)
-								if _apm_s and cb_inner[_apm_e:].strip():
-									# activate_production_methods is not last — move it to the end
-									_apm_text = cb_inner[_apm.start():_apm_e]
-									_new_inner = (cb_inner[:_apm.start()].rstrip()
-										+ cb_inner[_apm_e:].rstrip()
-										+ "\n\t\t\t\t" + _apm_text.strip())
-									new_inner_parts.append(
-										inner_region[cb_abs_start:cb_s+1] + _new_inner + "\n\t\t\t}"
-									)
-									inner_modified = True
-									inner_cursor = cb_e
-									last_inner_idx = cb_e
-									continue
-							new_inner_parts.append(cb_full)
+							reordered_cb = self.rebuild_create_building_block(inner_region[cb_abs_start:cb_s+1], cb_inner)
+							if reordered_cb != cb_full:
+								new_inner_parts.append(reordered_cb)
+								inner_modified = True
+							else:
+								new_inner_parts.append(cb_full)
 							inner_cursor = cb_e
 							last_inner_idx = cb_e
 							continue
@@ -1513,7 +1588,12 @@ class Vic3Logic:
 							# Monuments, unique buildings, and other unknown types are left as-is.
 							known_type = (b_type in self.CAT_A_STATE or b_type in self.CAT_B_SELF or b_type in self.CAT_C_RURAL or b_type in self.CAT_D_URBAN)
 							if not known_type:
-								new_inner_parts.append(cb_full)
+								reordered_cb = self.rebuild_create_building_block(inner_region[cb_abs_start:cb_s+1], cb_inner)
+								if reordered_cb != cb_full:
+									new_inner_parts.append(reordered_cb)
+									inner_modified = True
+								else:
+									new_inner_parts.append(cb_full)
 								inner_cursor = cb_e
 								last_inner_idx = cb_e
 								continue
@@ -1524,7 +1604,10 @@ class Vic3Logic:
 
 							ownership_block = self.get_ownership_block(b_type, owner_tag, level_val, state_name)
 
-							new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner.rstrip() + ownership_block + "\n\t\t\t}"
+							new_cb_block = self.rebuild_create_building_block(
+								inner_region[cb_abs_start:cb_s+1],
+								new_cb_inner.rstrip() + ownership_block
+							)
 							new_inner_parts.append(new_cb_block)
 							inner_modified = True
 						else:
@@ -1536,242 +1619,119 @@ class Vic3Logic:
 								ao_s, ao_e = self.find_block_content(cb_inner, ao_m.end()-1)
 								if ao_s:
 									ao_content = cb_inner[ao_s+1:ao_e-1]
+									entries = self.parse_ownership_entries(ao_content)
+									total_levels = sum(e["levels"] for e in entries) if entries else 1
 
-									# Per-entry cross-state check: process each building sub-entry in ao_content
-									# individually so mixed same-state/cross-state blocks are handled correctly.
-									# Cross-state entries revert the upstream c:old->c:new swap (partial transfer);
-									# same-state entries are already correct from the blanket substitution.
-									if re.search(r"\bbuilding\s*=\s*\{", ao_content):
-										_new_ao_parts = []
-										_ao_cur = 0
-										_ao_changed = False
-										_has_same = False
-										while True:
-											_em = re.search(r"\bbuilding\s*=\s*\{", ao_content[_ao_cur:])
-											if not _em:
-												_new_ao_parts.append(ao_content[_ao_cur:])
-												break
-											_e_start = _ao_cur + _em.start()
-											_new_ao_parts.append(ao_content[_ao_cur:_e_start])
-											_es_s, _es_e = self.find_block_content(ao_content, _ao_cur + _em.end() - 1)
-											if _es_s:
-												_sub = ao_content[_e_start:_es_e]
-												_sub_inner = ao_content[_es_s+1:_es_e-1]
-												_rgn_m = re.search(r'region\s*=\s*"?(?:s:)?([A-Za-z0-9_]+)"?', _sub_inner, re.IGNORECASE)
-												_sub_rgn = _rgn_m.group(1) if _rgn_m else None
-												if _sub_rgn and _sub_rgn.upper() != state_name.upper():
-													# Cross-state entry: revert the upstream swap if partial transfer.
-													if old_tag and not full_annex:
-														_clean_old = old_tag.replace("c:", "").strip()
-														_sub = re.sub(f"c:{re.escape(owner_tag)}", f"c:{_clean_old}", _sub, flags=re.IGNORECASE)
-														_ao_changed = True
-												else:
-													_has_same = True
-												_new_ao_parts.append(_sub)
-												_ao_cur = _es_e
+									if not entries:
+										should_rewrite = True
+									else:
+										involved_tags = {owner_tag.upper()}
+										clean_old = old_tag.replace("c:", "").strip().upper() if old_tag else None
+										if clean_old:
+											involved_tags.add(clean_old)
+
+										new_entries = []
+										entries_changed = False
+
+										for entry in entries:
+											entry_text = entry["text"]
+											entry_tag = entry["country"].upper() if entry["country"] else None
+											entry_region = entry["region"]
+											entry_levels = entry["levels"] or 1
+											is_same_state = (entry_region is None or entry_region == state_name.upper())
+											is_involved = entry_tag in involved_tags if entry_tag else False
+
+											if entry["wrapper"] == "company":
+												if entry_tag and clean_old and entry_tag == owner_tag.upper():
+													if self.get_states_owned_by_country(clean_old):
+														entry_text = re.sub(
+															r"(country\s*=\s*\"?c:)" + re.escape(owner_tag) + r"\b",
+															r"\g<1>" + clean_old,
+															entry_text,
+															flags=re.IGNORECASE
+														)
+													else:
+														entry_text = self.get_ownership_content(b_type, owner_tag, entry_levels, state_name)
+												elif entry_tag and entry_tag not in involved_tags and not self.get_states_owned_by_country(entry_tag):
+													entry_text = self.get_ownership_content(b_type, owner_tag, entry_levels, state_name)
+												new_entries.append(entry_text)
+												entries_changed = entries_changed or (entry_text != entry["text"])
+												continue
+
+											if not is_same_state:
+												if is_involved and clean_old and not full_annex and entry_tag == owner_tag.upper():
+													entry_text = re.sub(
+														r"(country\s*=\s*\"?c:)" + re.escape(owner_tag) + r"\b",
+														r"\g<1>" + clean_old,
+														entry_text,
+														flags=re.IGNORECASE
+													)
+												elif entry_tag and entry_tag not in involved_tags and not self.get_states_owned_by_country(entry_tag):
+													entry_text = self.get_ownership_content(b_type, owner_tag, entry_levels, state_name)
+												new_entries.append(entry_text)
+												entries_changed = entries_changed or (entry_text != entry["text"])
+												continue
+
+											if not entry_tag:
+												new_entries.append(entry_text)
+												continue
+
+											if is_involved:
+												new_entries.append(entry_text)
+												continue
+
+											if self.get_states_owned_by_country(entry_tag):
+												if entry["wrapper"] == "country" and b_type not in self.CAT_A_STATE:
+													entry_text = self.get_ownership_content(b_type, entry_tag, entry_levels, state_name)
 											else:
-												_new_ao_parts.append(ao_content[_e_start:])
-												break
-										if _ao_changed or not _has_same:
-											# Rebuild the block: cross-state entries reverted, same-state entries preserved.
-											# Also fires when all entries are cross-state (no same-state → revert or pass-through).
-											_fixed_ao = "".join(_new_ao_parts)
-											new_ao_block = (
-												f"\n\t\t\t\tadd_ownership = {{"
-												f"{_fixed_ao}"
-												f"\n\t\t\t\t}}"
+												entry_text = self.get_ownership_content(b_type, owner_tag, entry_levels, state_name)
+
+											new_entries.append(entry_text)
+											entries_changed = entries_changed or (entry_text != entry["text"])
+
+										if should_rewrite:
+											pass
+										else:
+											new_ao_block = self.build_add_ownership_block(new_entries)
+											new_cb_block = self.rebuild_create_building_block(
+												inner_region[cb_abs_start:cb_s+1],
+												cb_inner,
+												add_ownership_block=new_ao_block
 											)
-											new_cb_inner = cb_inner[:ao_m.start()].rstrip() + new_ao_block + cb_inner[ao_e:]
-											new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner.rstrip() + "\n\t\t\t}"
-											new_inner_parts.append(new_cb_block)
-											inner_modified = True
+											if entries_changed or new_cb_block != cb_full:
+												new_inner_parts.append(new_cb_block)
+												inner_modified = True
+											else:
+												new_inner_parts.append(cb_full)
 											inner_cursor = cb_e
 											last_inner_idx = cb_e
 											continue
 
-									# Rule 1: Building owned by a building in the same state.
-									# The country tags have already been swapped upstream — preserve the block exactly.
-									if (re.search(r"building\s*=\s*\{", ao_content) and
-											re.search(r'region\s*=\s*"?(?:s:)?' + re.escape(state_name) + r'"?', ao_content, re.IGNORECASE)):
-										new_inner_parts.append(cb_full)
-										inner_cursor = cb_e
-										last_inner_idx = cb_e
-										continue
-
-									# Rule 2 early check: company = { ... } ownership is not parsed by
-									# consolidate_ownership, so intercept it here before consolidation.
-									if re.search(r"\bcompany\s*=\s*\{", ao_content):
-										co_m = re.search(r"company\s*=\s*\{[^}]*?country\s*=\s*c:([A-Za-z0-9_]+)", ao_content, re.DOTALL)
-										company_country = co_m.group(1).upper() if co_m else None
-										if company_country and old_tag and company_country.upper() == owner_tag.upper():
-											# Company country was swapped upstream (old_tag -> owner_tag)
-											if self.get_states_owned_by_country(old_tag):
-												# old_tag still owns states -> restore company ownership (un-swap)
-												fixed_ao = re.sub(
-													r"(company\s*=\s*\{[^}]*?country\s*=\s*c:)" + re.escape(owner_tag),
-													r"\g<1>" + old_tag,
-													ao_content, flags=re.IGNORECASE | re.DOTALL
-												)
-												new_ao_block = (
-													f"\n\t\t\t\tadd_ownership = {{"
-													f"{fixed_ao.rstrip()}"
-													f"\n\t\t\t\t}}"
-												)
-											else:
-												# old_tag has no states left -> company disbanded, rewrite to self-ownership
-												total_levels_co = sum(int(x) for x in re.findall(r"levels\s*=\s*(\d+)", ao_content)) or 1
-												new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
-												ownership_block = self.get_ownership_block(b_type, owner_tag, total_levels_co, state_name)
-												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
-												new_inner_parts.append(new_cb_block)
-												inner_modified = True
-												inner_cursor = cb_e
-												last_inner_idx = cb_e
-												continue
-										else:
-											# Third-country or old_tag unknown.
-											# If that company's home country has no states, it is effectively dead — rewrite.
-											if company_country and not self.get_states_owned_by_country(company_country):
-												total_levels_co = sum(int(x) for x in re.findall(r"levels\s*=\s*(\d+)", ao_content)) or 1
-												new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
-												ownership_block = self.get_ownership_block(b_type, owner_tag, total_levels_co, state_name)
-												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
-												new_inner_parts.append(new_cb_block)
-												inner_modified = True
-												inner_cursor = cb_e
-												last_inner_idx = cb_e
-												continue
-											# Third-country company with living owner — preserve as-is
-											new_ao_block = (
-												f"\n\t\t\t\tadd_ownership = {{"
-												f"{ao_content.rstrip()}"
-												f"\n\t\t\t\t}}"
-											)
-										new_cb_inner = cb_inner[:ao_m.start()].rstrip() + new_ao_block + cb_inner[ao_e:]
-										new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner.rstrip() + "\n\t\t\t}"
-										new_inner_parts.append(new_cb_block)
-										inner_modified = True
-										inner_cursor = cb_e
-										last_inner_idx = cb_e
-										continue
-
-									# CONSOLIDATE FIRST: Merge duplicates caused by replacements
-									consolidated = self.consolidate_ownership(ao_content)
-
-									# If consolidation resulted in empty (invalid/empty input), force rewrite
-									if not consolidated.strip():
-										should_rewrite = True
-										total_levels = 1 # Default if unknown
-										# Try to salvage levels from raw string if possible
-										raw_lvl = re.findall(r"levels\s*=\s*(\d+)", ao_content)
-										if raw_lvl:
-											total_levels = sum(int(x) for x in raw_lvl)
-									else:
-										total_levels = 0
-										levels_matches = re.findall(r"levels\s*=\s*(\d+)", consolidated)
-										for l in levels_matches: total_levels += int(l)
-
-										is_country_type = "country =" in consolidated and "type =" not in consolidated
-										is_company_type = "company" in consolidated
-
-										requires_special = b_type not in self.CAT_A_STATE
-
-										# Rule 2: Company-owned building — preserve ownership or rewrite if company disbanded
-										if is_company_type:
-											co_m = re.search(r"company\s*=\s*\{[^}]*?country\s*=\s*c:([A-Za-z0-9_]+)", consolidated, re.DOTALL)
-											company_country = co_m.group(1).upper() if co_m else None
-
-											if company_country and old_tag and company_country.upper() == owner_tag.upper():
-												# Company country was swapped upstream (old_tag -> owner_tag).
-												# The real company home country was old_tag.
-												if self.get_states_owned_by_country(old_tag):
-													# old_tag still owns states -> restore company ownership (un-swap)
-													fixed_consolidated = re.sub(
-														r"(company\s*=\s*\{[^}]*?country\s*=\s*c:)" + re.escape(owner_tag),
-														r"\g<1>" + old_tag,
-														consolidated, flags=re.IGNORECASE | re.DOTALL
-													)
-													new_ao_block = (
-														f"\n\t\t\t\tadd_ownership = {{"
-														f"{fixed_consolidated.rstrip()}"
-														f"\n\t\t\t\t}}"
-													)
-													new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
-													new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
-													new_inner_parts.append(new_cb_block)
-													inner_modified = True
-													inner_cursor = cb_e
-													last_inner_idx = cb_e
-													continue
-												else:
-													# old_tag has no states left -> company disbanded, rewrite to self-ownership
-													should_rewrite = True
-											else:
-												# Third-country company (not old_tag).
-												# If that company's home country has no states, it is dead — rewrite.
-												if company_country and not self.get_states_owned_by_country(company_country):
-													should_rewrite = True
-												else:
-													# Living third-country company — preserve as-is
-													new_ao_block = (
-														f"\n\t\t\t\tadd_ownership = {{"
-														f"{consolidated.rstrip()}"
-														f"\n\t\t\t\t}}"
-													)
-													new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
-													new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
-													new_inner_parts.append(new_cb_block)
-													inner_modified = True
-													inner_cursor = cb_e
-													last_inner_idx = cb_e
-													continue
-
-										# Rule 3: Country-owned building — if owned by the state owner, change with state;
-										# if owned by an uninvolved third country, preserve their ownership.
-										if is_country_type and requires_special:
-											country_m = re.search(r'\bc:([A-Za-z0-9_]+)\b', consolidated)
-											actual_tag = country_m.group(1).upper() if country_m else owner_tag.upper()
-
-											if actual_tag.upper() != owner_tag.upper():
-												# Third-country ownership: convert format but keep their tag
-												new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
-												ownership_block = self.get_ownership_block(b_type, actual_tag, total_levels, state_name)
-												new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
-												new_inner_parts.append(new_cb_block)
-												inner_modified = True
-												inner_cursor = cb_e
-												last_inner_idx = cb_e
-												continue
-											# else: actual_tag == owner_tag — upstream swap already updated the tag;
-											# fall through to inject consolidated content as-is (format preserved).
-
 									if should_rewrite:
-										# Regenerate completely
-										new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
 										ownership_block = self.get_ownership_block(b_type, owner_tag, total_levels, state_name)
-
-										new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner_base + ownership_block + "\n\t\t\t}"
-										new_inner_parts.append(new_cb_block)
-										inner_modified = True
-									else:
-										# Just inject the consolidated content if it changed
-										new_ao_block = (
-											f"\n\t\t\t\tadd_ownership = {{"
-											f"{consolidated.rstrip()}"
-											f"\n\t\t\t\t}}"
+										new_cb_inner_base = cb_inner[:ao_m.start()].rstrip() + cb_inner[ao_e:]
+										new_cb_block = self.rebuild_create_building_block(
+											inner_region[cb_abs_start:cb_s+1],
+											new_cb_inner_base,
+											add_ownership_block=ownership_block
 										)
-										
-										# Reconstruct create_building block with new add_ownership
-										new_cb_inner = cb_inner[:ao_m.start()] + new_ao_block + cb_inner[ao_e:]
-										new_cb_block = inner_region[cb_abs_start:cb_s+1] + new_cb_inner + "\n\t\t\t}"
-
 										new_inner_parts.append(new_cb_block)
 										inner_modified = True
 								else:
 									# Parse failed, preserve original
-									new_inner_parts.append(cb_full)
+									reordered_cb = self.rebuild_create_building_block(inner_region[cb_abs_start:cb_s+1], cb_inner)
+									if reordered_cb != cb_full:
+										new_inner_parts.append(reordered_cb)
+										inner_modified = True
+									else:
+										new_inner_parts.append(cb_full)
 							else:
-								new_inner_parts.append(cb_full)
+								reordered_cb = self.rebuild_create_building_block(inner_region[cb_abs_start:cb_s+1], cb_inner)
+								if reordered_cb != cb_full:
+									new_inner_parts.append(reordered_cb)
+									inner_modified = True
+								else:
+									new_inner_parts.append(cb_full)
 
 						inner_cursor = cb_e
 						last_inner_idx = cb_e
@@ -1858,7 +1818,8 @@ class Vic3Logic:
 								last_nl = before_close.rfind('\n')
 								if last_nl >= 0 and not before_close[last_nl+1:].strip():
 									close_indent = before_close[last_nl+1:]
-								new_c = new_c[:ne-1].rstrip() + f"\n{prov_indent}{provinces}\n{close_indent}" + new_c[ne-1:]
+								formatted_provinces = self._indent_multiline_value(provinces, prov_indent)
+								new_c = new_c[:ne-1].rstrip() + f"\n{formatted_provinces}\n{close_indent}" + new_c[ne-1:]
 							else:
 								# Inline format: convert to multi-line, inferring indentation from 'country' line
 								country_m = re.search(r'^(\s*)country\s*=', new_c, re.MULTILINE)
@@ -1870,7 +1831,9 @@ class Vic3Logic:
 									prov_indent = "\t\t\t\t\t"
 									close_indent = "\t\t\t\t"
 								existing = inner.strip()
-								new_block = f"\n{prov_indent}{existing}\n{prov_indent}{provinces}\n{close_indent}"
+								formatted_existing = self._indent_multiline_value(existing, prov_indent)
+								formatted_provinces = self._indent_multiline_value(provinces, prov_indent)
+								new_block = f"\n{formatted_existing}\n{formatted_provinces}\n{close_indent}"
 								new_c = new_c[:ns+1] + new_block + new_c[ne-1:]
 						else:
 							lb = new_c.rfind('}')
@@ -8912,18 +8875,35 @@ class StateManager:
 			return
 
 		# Only new states generally have one owner covering all provinces initially
-		prov_str = " ".join(f'"{p}"' for p in sobj.provinces)
+		prov_block = self._format_owned_provinces_block(sobj.provinces, indent="\t\t\t")
 
 		content = f"""STATES = {{
 	s:{state_id} = {{
 		create_state = {{
 			country = c:{owner_tag}
-			owned_provinces = {{ {prov_str} }}
+{prov_block}
 		}}
 	}}
 }}"""	# todo: redo
 		with open(fpath, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
+
+	def _format_owned_provinces_block(self, provinces, indent="\t\t\t"):
+		sorted_provs = [f'"{p.lower()}"' for p in sorted(list(provinces))]
+		if not sorted_provs:
+			return f"{indent}owned_provinces = {{\n{indent}}}"
+		prov_line = " ".join(sorted_provs)
+		return (
+			f"{indent}owned_provinces = {{\n"
+			f"{indent}\t{prov_line}\n"
+			f"{indent}}}"
+		)
+
+	def _indent_multiline_value(self, text, indent):
+		lines = [line.strip() for line in text.splitlines() if line.strip()]
+		if not lines:
+			return ""
+		return "\n".join(f"{indent}{line}" for line in lines)
 
 	def _add_to_strategic_region(self, state_id, region_name):
 		clean_reg = region_name.replace("sr:", "").strip()
@@ -9106,8 +9086,8 @@ class StateManager:
 											block_modified = True
 											# Do not append anything to new_block_parts
 										else:
-											new_prov_str = " ".join([f'"{p.lower()}"' for p in sorted(list(current_provs))])
-											new_cs_body = cs_body[:op_s+1] + " " + new_prov_str + " " + cs_body[op_e-1:]
+											prov_block = self._format_owned_provinces_block(current_provs, indent="\t\t")
+											new_cs_body = cs_body[:op_m.start()].rstrip() + "\n" + prov_block + "\n"
 											new_block_parts.append(f"create_state = {{{new_cs_body}}}")
 											block_modified = True
 									else:
@@ -9157,10 +9137,10 @@ class StateManager:
 										# Empty after conversion -> remove block
 										block_modified = True
 									else:
-										new_prov_str = " ".join([f'"{p.lower()}"' for p in sorted(list(current_provs))])
+										prov_block = self._format_owned_provinces_block(current_provs, indent="\t\t")
 										# Construct new explicit body
 										# Inject owned_provinces before closing brace
-										new_cs_body = cs_body.rstrip() + f"\n\t\towned_provinces = {{ {new_prov_str} }}\n"
+										new_cs_body = cs_body.rstrip() + f"\n{prov_block}\n"
 										new_block_parts.append(f"create_state = {{{new_cs_body}}}")
 										block_modified = True
 								else:
@@ -9182,9 +9162,14 @@ class StateManager:
 						if owner == "__ANY__": continue
 						if owner not in owners_processed and provs:
 							# Create new block for this owner
-							p_str = " ".join([f'"{p.lower()}"' for p in sorted(list(provs))])
+							prov_block = self._format_owned_provinces_block(provs, indent="\t\t")
 							clean_tag = owner if owner.startswith("c:") else f"c:{owner}"
-							block_str = f'\n\tcreate_state = {{\n\t\tcountry = {clean_tag}\n\t\towned_provinces = {{ {p_str} }}\n\t}}'
+							block_str = (
+								f'\n\tcreate_state = {{'
+								f'\n\t\tcountry = {clean_tag}'
+								f'\n{prov_block}'
+								f'\n\t}}'
+							)
 							pending_new_blocks.append(block_str)
 							block_modified = True
 
