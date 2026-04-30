@@ -1800,6 +1800,12 @@ class Vic3Logic:
 			content = self.fix_building_ownership(content, clean_new, state_str, old_tag=old_tag)
 		return content
 
+	def _indent_multiline_value(self, text, indent):
+		lines = [line.strip() for line in text.splitlines() if line.strip()]
+		if not lines:
+			return ""
+		return "\n".join(f"{indent}{line}" for line in lines)
+
 	def merge_split_state(self, content, state_name, old_tag, new_tag, folder):
 		clean_old = old_tag.replace("c:", "").strip()
 		clean_new = new_tag.replace("c:", "").strip()
