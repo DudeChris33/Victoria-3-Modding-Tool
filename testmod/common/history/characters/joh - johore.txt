@@ -1,0 +1,11 @@
+﻿CHARACTERS = {
+	c:JOH ?= {
+		create_character = {
+			template = JOH_tun_haji_abdullah_temenggong
+		}
+		
+		create_character = {
+			template = JOH_ali_iskandar_bendahara
+		}
+	}
+}
