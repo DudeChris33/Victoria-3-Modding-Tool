@@ -5248,6 +5248,61 @@ class Vic3Logic:
 								cursor += 1
 						return sorted(list(owners))
 		return sorted(list(owners))
+	def parse_states_file_ownership(self, filepath):
+		"""Parse a common/history/states-format file. Returns {STATE_NAME: primary_tag}."""
+		try:
+			with open(filepath, 'r', encoding='utf-8-sig') as f:
+				content = f.read()
+		except Exception:
+			with open(filepath, 'r', encoding='utf-8') as f:
+				content = f.read()
+		result = {}
+		cursor = 0
+		while True:
+			m = re.search(r"s:(STATE_[A-Za-z0-9_]+)\s*=\s*\{", content[cursor:])
+			if not m:
+				break
+			state_name = m.group(1)
+			abs_pos = cursor + m.end() - 1
+			s_idx, e_idx = self.find_block_content(content, abs_pos)
+			if s_idx:
+				block = content[s_idx:e_idx]
+				cs_cursor = 0
+				primary_tag = None
+				while True:
+					cs = re.search(r"create_state\s*=\s*\{", block[cs_cursor:])
+					if not cs:
+						break
+					cs_s, cs_e = self.find_block_content(block, cs_cursor + cs.end() - 1)
+					if cs_s:
+						cs_inner = block[cs_s:cs_e]
+						tag_m = re.search(r"country\s*=\s*c:([A-Za-z0-9_]+)", cs_inner)
+						if tag_m and primary_tag is None:
+							primary_tag = tag_m.group(1).upper()
+						cs_cursor = cs_e
+					else:
+						cs_cursor += 1
+				if primary_tag:
+					result[state_name] = primary_tag
+				cursor = e_idx
+			else:
+				cursor += 1
+		return result
+
+	def compute_states_diff(self, imported_path):
+		"""Compare imported history/states file against current mod.
+		Returns [(state_name, old_tag, new_tag)] for states whose primary owner differs."""
+		imported = self.parse_states_file_ownership(imported_path)
+		transfers = []
+		for state_name, new_tag in sorted(imported.items()):
+			current_owners = self.scan_state_region_owners(state_name)
+			if not current_owners:
+				continue
+			others = [o for o in current_owners if o.upper() != new_tag.upper()]
+			if not others:
+				continue
+			transfers.append((state_name, others[0], new_tag))
+		return transfers
 
 	def get_states_owned_by_country(self, tag):
 		"""Returns True if the given country tag owns at least one state (create_state) in history/states."""
@@ -9925,6 +9980,12 @@ class App(tk.Tk):
 		self.run_btn.config(text="Execute Transfer", command=self.start_transfer, state='normal')
 		self.update_transfer_ui_visibility()
 
+		ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=3, sticky=tk.EW, pady=8)
+		import_row = ttk.Frame(f)
+		import_row.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=2)
+		ttk.Label(import_row, text="Or auto-detect transfers from a states file:").pack(side=tk.LEFT, padx=(0, 10))
+		ttk.Button(import_row, text="Import States File...", command=self.open_import_states_dialog).pack(side=tk.LEFT)
+
 	def update_transfer_ui_visibility(self):
 		mode = self.tr_mode.get()
 		if mode == "annex":
@@ -11494,6 +11555,54 @@ class App(tk.Tk):
 		finally:
 			self.is_processing = False
 			self.after(0, lambda: self.run_btn.config(state='normal'))
+
+	def open_import_states_dialog(self):
+		if not self.logic.mod_path:
+			return messagebox.showerror("Error", "Select mod path first.")
+		filepath = filedialog.askopenfilename(
+			title="Select States History File",
+			filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+		)
+		if not filepath:
+			return
+		try:
+			transfers = self.logic.compute_states_diff(filepath)
+		except Exception as e:
+			return messagebox.showerror("Error", f"Failed to parse file:\n{e}")
+		if not transfers:
+			return messagebox.showinfo("No Changes",
+				"No ownership differences found between the imported file and the current mod.")
+		ImportStatesDiffDialog(self, self.logic, transfers)
+
+	def run_import_states_logic(self, transfers, dialog_log):
+		try:
+			groups = {}
+			for state_name, old_tag, new_tag in transfers:
+				if new_tag not in groups:
+					groups[new_tag] = []
+				groups[new_tag].append(state_name)
+			for new_tag, states in groups.items():
+				dialog_log(f"--- Transferring {len(states)} state(s) -> {new_tag} ---", 'info')
+				ownersFound = set()
+				for state in states:
+					ownersFound.update(self.logic.scan_state_region_owners(state))
+				ownersFound.discard(new_tag.upper())
+				ownersFound.discard(new_tag)
+				annex_list = []
+				for owner in ownersFound:
+					current_owned = self.logic.get_all_owned_states(owner)
+					set_current = set(s.upper() for s in current_owned)
+					set_transfer = set(s.upper() for s in states)
+					if set_current and set_current.issubset(set_transfer):
+						annex_list.append(owner)
+				self.logic.perform_transfer_sequence(states, new_tag, known_old_owners=None)
+				for owner in annex_list:
+					dialog_log(f"[INFO] Full annexation detected for {owner}.", 'info')
+					self.logic.perform_annexation_cleanup(owner, new_tag, states)
+			dialog_log("--- Import transfer complete ---", 'success')
+		except Exception as e:
+			dialog_log(f"CRITICAL ERROR: {str(e)}", 'error')
+			traceback.print_exc()
 
 	def run_create_logic(self, tag, name, adj, old_owner, capital, others_raw, rgb, is_annex, cultures, religion, tier, country_type, pop_wealth, pop_lit):
 		try:
@@ -13147,6 +13256,65 @@ class App(tk.Tk):
 			ttk.Label(f, text="Pillow (PIL) library required for map editor.", foreground="red").pack(pady=10)
 
 		self.run_btn.pack_forget()
+
+
+class ImportStatesDiffDialog(tk.Toplevel):
+	def __init__(self, parent, logic, transfers):
+		super().__init__(parent)
+		self.title("Import States File - Detected Transfers")
+		self.geometry("640x540")
+		self.configure(bg="#212121")
+		self.parent = parent
+		self.logic = logic
+		self.transfers = transfers
+		self.resizable(True, True)
+		self._build_ui()
+
+	def _build_ui(self):
+		ttk.Label(self, text=f"Detected {len(self.transfers)} state transfer(s). Review then execute:").pack(
+			padx=10, pady=(10, 4), anchor=tk.W)
+		list_frame = ttk.Frame(self)
+		list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+		scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+		self.listbox = tk.Listbox(
+			list_frame, yscrollcommand=scrollbar.set,
+			bg="#2d2d2d", fg="#ECEFF1", selectbackground="#37474F",
+			height=14, font=("Consolas", 10))
+		scrollbar.config(command=self.listbox.yview)
+		scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+		self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+		for state, old_tag, new_tag in self.transfers:
+			self.listbox.insert(tk.END, f"  {state:<40} {old_tag:>5}  ->  {new_tag}")
+		log_frame = ttk.LabelFrame(self, text="Log", padding=5)
+		log_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=4)
+		self.log_area = scrolledtext.ScrolledText(
+			log_frame, state='disabled', height=6,
+			bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 9), relief="flat")
+		self.log_area.pack(fill=tk.BOTH, expand=True)
+		self.log_area.tag_config('info',    foreground='#d4d4d4')
+		self.log_area.tag_config('warn',    foreground='#FFA726')
+		self.log_area.tag_config('error',   foreground='#EF5350')
+		self.log_area.tag_config('success', foreground='#66BB6A')
+		btn_frame = ttk.Frame(self)
+		btn_frame.pack(fill=tk.X, padx=10, pady=10)
+		self.execute_btn = ttk.Button(btn_frame, text="Execute Transfers", command=self._start_execute)
+		self.execute_btn.pack(side=tk.RIGHT, padx=5)
+		ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+
+	def _log(self, msg, tag='info'):
+		self.log_area.config(state='normal')
+		self.log_area.insert(tk.END, msg + "\n", tag)
+		self.log_area.see(tk.END)
+		self.log_area.config(state='disabled')
+		self.parent.log_message(msg, tag)
+
+	def _start_execute(self):
+		self.execute_btn.config(state='disabled')
+		threading.Thread(
+			target=self.parent.run_import_states_logic,
+			args=(self.transfers, self._log),
+			daemon=True
+		).start()
 
 
 class Vic3ProvincePainter(tk.Toplevel):
