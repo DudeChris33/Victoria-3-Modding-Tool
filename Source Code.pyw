@@ -1500,10 +1500,11 @@ class Vic3Logic:
 		return entries
 
 	def build_add_ownership_block(self, entry_texts):
-		content = "".join(entry_texts).strip()
+		parts = [t.strip() for t in entry_texts if t.strip()]
+		inner = "\n\t\t\t\t\t".join(parts)
 		return (
 			f"\n\t\t\t\tadd_ownership = {{"
-			f"\n\t\t\t\t\t{content}"
+			f"\n\t\t\t\t\t{inner}"
 			f"\n\t\t\t\t}}"
 		)
 
@@ -2128,7 +2129,7 @@ class Vic3Logic:
 								new_f_body_parts.append(f_body[u_abs_start:])
 								break
 							unit_block = f_body[u_abs_start:u_end]
-							if formation_in_scope:
+							if formation_in_scope and force_move:
 								self.log(f"[MIL] Transferring fleet ship to c:{new_tag}")
 								clean_block = self.clean_unit_string(unit_block)
 								stolen_units_fleet.append(clean_block)
