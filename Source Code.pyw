@@ -5248,8 +5248,11 @@ class Vic3Logic:
 								cursor += 1
 						return sorted(list(owners))
 		return sorted(list(owners))
-	def parse_states_file_ownership(self, filepath):
-		"""Parse a common/history/states-format file. Returns {STATE_NAME: primary_tag}."""
+	def parse_states_file_ownership(self, filepath, state_filter=None):
+		"""Parse a common/history/states-format file.
+		Returns {STATE_NAME: {owner_tag: frozenset_of_provinces}}.
+		Province set is empty frozenset when create_state has no owned_provinces block.
+		If state_filter (set of state names) is given, skips inner parsing for other states."""
 		try:
 			with open(filepath, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
@@ -5266,9 +5269,12 @@ class Vic3Logic:
 			abs_pos = cursor + m.end() - 1
 			s_idx, e_idx = self.find_block_content(content, abs_pos)
 			if s_idx:
+				if state_filter is not None and state_name not in state_filter:
+					cursor = e_idx
+					continue
 				block = content[s_idx:e_idx]
 				cs_cursor = 0
-				primary_tag = None
+				owners = {}
 				while True:
 					cs = re.search(r"create_state\s*=\s*\{", block[cs_cursor:])
 					if not cs:
@@ -5277,31 +5283,107 @@ class Vic3Logic:
 					if cs_s:
 						cs_inner = block[cs_s:cs_e]
 						tag_m = re.search(r"country\s*=\s*c:([A-Za-z0-9_]+)", cs_inner)
-						if tag_m and primary_tag is None:
-							primary_tag = tag_m.group(1).upper()
+						if tag_m:
+							tag = tag_m.group(1).upper()
+							op_m = re.search(r"owned_provinces\s*=\s*\{", cs_inner)
+							if op_m:
+								ops, ope = self.find_block_content(cs_inner, op_m.end() - 1)
+								if ops:
+									provs = frozenset(cs_inner[ops+1:ope-1].replace('"', '').split())
+								else:
+									provs = frozenset()
+							else:
+								provs = frozenset()
+							owners[tag] = provs
 						cs_cursor = cs_e
 					else:
 						cs_cursor += 1
-				if primary_tag:
-					result[state_name] = primary_tag
+				if owners:
+					result[state_name] = owners
 				cursor = e_idx
 			else:
 				cursor += 1
 		return result
 
+	def _load_province_ownership(self, state_names):
+		"""Scan mod+vanilla history/states files for a specific set of states.
+		Returns {STATE_NAME: {tag: frozenset_of_provinces}}. Mod overrides vanilla."""
+		result = {}
+		paths = []
+		if self.vanilla_path:
+			paths.append(os.path.join(self.vanilla_path, "game/common/history/states"))
+		if self.mod_path:
+			paths.append(os.path.join(self.mod_path, "common/history/states"))
+		for p in paths:
+			if not os.path.exists(p): continue
+			for root, _, files in os.walk(p):
+				for file in files:
+					if not file.endswith(".txt"): continue
+					partial = self.parse_states_file_ownership(
+						os.path.join(root, file), state_filter=state_names)
+					for state, owner_map in partial.items():
+						if state not in result:
+							result[state] = {}
+						result[state].update(owner_map)
+			return result
+
 	def compute_states_diff(self, imported_path):
 		"""Compare imported history/states file against current mod.
-		Returns [(state_name, old_tag, new_tag)] for states whose primary owner differs."""
+		Returns [(state_name, old_tag, new_tag)].
+		Pass 1: fast owner-set diff via scan_state_region_owners.
+		Pass 2: province-id overlap scan, only for ambiguous consolidation cases
+		        (multiple remaining owners, removed owner absorbed by one of them)."""
 		imported = self.parse_states_file_ownership(imported_path)
 		transfers = []
-		for state_name, new_tag in sorted(imported.items()):
-			current_owners = self.scan_state_region_owners(state_name)
+		ambiguous = []  # (state_name, imported_owner_map, removed, remaining)
+		
+		# Pass 1: owner-set diff -- no province data needed
+		for state_name, imported_owner_map in sorted(imported.items()):
+			current_owners = set(o.upper() for o in self.scan_state_region_owners(state_name))
 			if not current_owners:
 				continue
-			others = [o for o in current_owners if o.upper() != new_tag.upper()]
-			if not others:
+			imported_owners = set(imported_owner_map.keys())
+			removed = current_owners - imported_owners
+			added = imported_owners - current_owners
+			if not removed:
 				continue
-			transfers.append((state_name, others[0], new_tag))
+			if added:
+				if len(added) > 1:
+					continue
+				new_tag = next(iter(added))
+				for old_tag in sorted(removed):
+					transfers.append((state_name, old_tag, new_tag))
+			else:
+				remaining = current_owners & imported_owners
+				if not remaining:
+					continue
+				if len(remaining) == 1:
+					new_tag = next(iter(remaining))
+					for old_tag in sorted(removed):
+						transfers.append((state_name, old_tag, new_tag))
+				else:
+					ambiguous.append((state_name, imported_owner_map, removed, remaining))
+		
+		# Pass 2: province overlap -- only reached when ambiguous cases exist
+		if ambiguous:
+			ambig_states = {s for s, _, _, _ in ambiguous}
+			current_provs = self._load_province_ownership(ambig_states)
+			for state_name, imported_owner_map, removed, remaining in ambiguous:
+				current_owner_map = current_provs.get(state_name, {})
+				for old_tag in sorted(removed):
+					old_provs = current_owner_map.get(old_tag, frozenset())
+					if not old_provs:
+						continue
+					best_match = None
+					best_overlap = 0
+					for rem in remaining:
+						gained = imported_owner_map.get(rem, frozenset()) - current_owner_map.get(rem, frozenset())
+						overlap = len(gained & old_provs)
+						if overlap > best_overlap:
+							best_overlap = overlap
+							best_match = rem
+					if best_match:
+						transfers.append((state_name, old_tag, best_match))
 		return transfers
 
 	def get_states_owned_by_country(self, tag):
@@ -11576,29 +11658,26 @@ class App(tk.Tk):
 
 	def run_import_states_logic(self, transfers, dialog_log):
 		try:
+			# Group by (new_tag, old_tag) so each call targets only the specific sub-state owner
 			groups = {}
 			for state_name, old_tag, new_tag in transfers:
-				if new_tag not in groups:
-					groups[new_tag] = []
-				groups[new_tag].append(state_name)
-			for new_tag, states in groups.items():
-				dialog_log(f"--- Transferring {len(states)} state(s) -> {new_tag} ---", 'info')
-				ownersFound = set()
-				for state in states:
-					ownersFound.update(self.logic.scan_state_region_owners(state))
-				ownersFound.discard(new_tag.upper())
-				ownersFound.discard(new_tag)
-				annex_list = []
-				for owner in ownersFound:
-					current_owned = self.logic.get_all_owned_states(owner)
-					set_current = set(s.upper() for s in current_owned)
-					set_transfer = set(s.upper() for s in states)
-					if set_current and set_current.issubset(set_transfer):
-						annex_list.append(owner)
-				self.logic.perform_transfer_sequence(states, new_tag, known_old_owners=None)
-				for owner in annex_list:
-					dialog_log(f"[INFO] Full annexation detected for {owner}.", 'info')
-					self.logic.perform_annexation_cleanup(owner, new_tag, states)
+				key = (new_tag, old_tag)
+				if key not in groups:
+					groups[key] = []
+				groups[key].append(state_name)
+			for (new_tag, old_tag), states in groups.items():
+				dialog_log(f"--- {old_tag} -> {new_tag}: {len(states)} state(s) ---", 'info')
+				# Check if old_tag is fully annexed (loses all its states)
+				annex = False
+				current_owned = self.logic.get_all_owned_states(old_tag)
+				set_current = set(s.upper() for s in current_owned)
+				set_transfer = set(s.upper() for s in states)
+				if set_current and set_current.issubset(set_transfer):
+					annex = True
+				self.logic.perform_transfer_sequence(states, new_tag, known_old_owners=[old_tag])
+				if annex:
+					dialog_log(f"[INFO] Full annexation detected for {old_tag}.", 'info')
+					self.logic.perform_annexation_cleanup(old_tag, new_tag, states)
 			dialog_log("--- Import transfer complete ---", 'success')
 		except Exception as e:
 			dialog_log(f"CRITICAL ERROR: {str(e)}", 'error')
