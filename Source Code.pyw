@@ -2493,33 +2493,82 @@ class Vic3Logic:
 					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
 					first_fm_scope = first_fm_scope or existing_fm_scope
 				else:
-					self.log(f"      [CREATE] Creating {f_type} formation ({sr_key}) for c:{new_tag}")
-					immersive_name = self.generate_immersive_name(sr_key, f_type)
-					new_fm_scope = f"auto_{new_tag.lower()}_{sr_key}_{f_type}"
-					unit_str = "\n" + indent_units(units, 3)
-					print(unit_str)	# todo: unit_buffer check
-					block_str = (
-						f"\n\t\tcreate_military_formation = {{"
-						f"\n\t\t\tname = {immersive_name}"
-						f"\n\t\t\ttype = {f_type}"
-						f"\n\t\t\thq_region = {hq_region_val}"
-						f"\n\t\t\tsave_scope_as = {new_fm_scope}"
-						f"\n\t\t\t# Transferred Units"
-						f"{unit_str}"
-						f"\n\t\t}}"
-					)
-					if last_tag_pos != -1:
-						_, end_brace = self.find_block_content(file_content, last_tag_pos)
-						insert_pos = end_brace - 1
-						file_content = file_content[:insert_pos] + "\n" + block_str + "\n" + file_content[insert_pos:]
-					else:
-						mf_start, mf_end = self.get_block_range_safe(file_content, "MILITARY_FORMATIONS")
-						if mf_start is not None:
-							insert_pos = mf_end - 1
-							file_content = file_content[:insert_pos] + f"\n\tc:{new_tag} ?= {{\n{block_str}\n\t}}\n" + file_content[insert_pos:]
+					# Before creating, check all other mil files for existing matching formation
+					mil_dir_inj = os.path.dirname(filepath)
+					injected_other = False
+					for other_fn in sorted(os.listdir(mil_dir_inj)):
+						if not other_fn.endswith(".txt"): continue
+						other_path = os.path.join(mil_dir_inj, other_fn)
+						if os.path.abspath(other_path) == os.path.abspath(filepath): continue
+						try:
+							with open(other_path, 'r', encoding='utf-8-sig') as fh2: oc = fh2.read()
+						except:
+							try:
+								with open(other_path, 'r', encoding='utf-8') as fh2: oc = fh2.read()
+							except: continue
+						# Find latest c:{new_tag} block in this other file
+						oc_tag_pos = -1; oc_curr = 0
+						while True:
+							on2, oe2 = self.get_block_range_safe(oc, f"c:{new_tag}", oc_curr)
+							if on2 is None: break
+							oc_tag_pos = on2; oc_curr = oe2
+						if oc_tag_pos == -1: continue
+						oc_bs, oc_be = self.find_block_content(oc, oc_tag_pos)
+						if oc_bs is None: continue
+						oc_inner = oc[oc_bs + 1 : oc_be - 1]
+						fi_oc = 0; found_oc_insert = None; found_oc_scope = None
+						while True:
+							fi_oc_m = re.search(r"create_military_formation\s*=\s*\{", oc_inner[fi_oc:])
+							if not fi_oc_m: break
+							fi_oc_abs = fi_oc + fi_oc_m.start()
+							fi_oc_s, fi_oc_e = self.find_block_content(oc_inner, fi_oc + fi_oc_m.end() - 1)
+							if fi_oc_s is None: break
+							fi_oc_blk = oc_inner[fi_oc_abs:fi_oc_e]
+							oc_ty_m = re.search(r"\btype\s*=\s*(\w+)", fi_oc_blk)
+							oc_hq_m = re.search(r"hq_region\s*=\s*(?:sr:)?\"?([A-Za-z0-9_]+)\"?", fi_oc_blk)
+							if (oc_ty_m and oc_ty_m.group(1).lower() == f_type.lower() and
+									oc_hq_m and oc_hq_m.group(1).strip() == sr_key):
+								found_oc_insert = oc_bs + 1 + fi_oc_e - 1
+								oc_sc_m = re.search(r"save_scope_as\s*=\s*([A-Za-z0-9_]+)", fi_oc_blk)
+								if oc_sc_m: found_oc_scope = oc_sc_m.group(1)
+							fi_oc = fi_oc_e
+						if found_oc_insert is not None:
+							units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
+							new_oc = oc[:found_oc_insert] + units_text + "\n\t\t" + oc[found_oc_insert:]
+							with open(other_path, 'w', encoding='utf-8-sig') as fh2: fh2.write(new_oc)
+							first_fm_scope = first_fm_scope or found_oc_scope
+							self.log(f"      [MERGE] Merging {len(units)} unit(s) into existing {f_type} in {other_fn} for c:{new_tag}")
+							injected_other = True
+							break
+						if injected_other: break
+					if not injected_other:
+						immersive_name = self.generate_immersive_name(sr_key, f_type)
+						region_slug = sr_key.replace("region_", "").replace("water_body_", "")
+						new_fm_scope = f"auto_{f_type}_{region_slug}_{new_tag.lower()}"
+						unit_str = "\n" + indent_units(units, 3)
+						block_str = (
+							f"\n\t\tcreate_military_formation = {{"
+							f"\n\t\t\tname = {immersive_name}"
+							f"\n\t\t\ttype = {f_type}"
+							f"\n\t\t\thq_region = {hq_region_val}"
+							f"\n\t\t\tsave_scope_as = {new_fm_scope}"
+							f"\n\t\t\t# Transferred Units"
+							f"{unit_str}"
+							f"\n\t\t}}"
+						)
+						self.log(f"      [CREATE] Creating {f_type} formation ({immersive_name}) for c:{new_tag}")
+						if last_tag_pos != -1:
+							_, end_brace = self.find_block_content(file_content, last_tag_pos)
+							insert_pos = end_brace - 1
+							file_content = file_content[:insert_pos] + "\n" + block_str + "\n" + file_content[insert_pos:]
 						else:
-							file_content = file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"
-					first_fm_scope = first_fm_scope or new_fm_scope
+							mf_start, mf_end = self.get_block_range_safe(file_content, "MILITARY_FORMATIONS")
+							if mf_start is not None:
+								insert_pos = mf_end - 1
+								file_content = file_content[:insert_pos] + f"\n\tc:{new_tag} ?= {{\n{block_str}\n\t}}\n" + file_content[insert_pos:]
+							else:
+								file_content = file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"
+						first_fm_scope = first_fm_scope or new_fm_scope
 
 			# --- Inject generals into the first formation created/merged ---
 			if general_buffer:
