@@ -1694,12 +1694,17 @@ class Vic3Logic:
 
 											if not is_same_state:
 												if is_involved and clean_old and not full_annex and entry_tag == owner_tag.upper():
-													entry_text = re.sub(
-														r"(country\s*=\s*\"?c:)" + re.escape(owner_tag) + r"\b",
-														r"\g<1>" + clean_old,
-														entry_text,
-														flags=re.IGNORECASE
-													)
+													# Only revert c:owner_tag -> c:old_tag if old_tag actually owns the
+													# cross-state region. If owner_tag was the legitimate original owner
+													# (not a result of the blanket substitution), do not revert.
+													cross_owners = self.scan_state_region_owners(entry_region) if entry_region else []
+													if clean_old.upper() in [o.upper() for o in cross_owners]:
+														entry_text = re.sub(
+															r"(country\s*=\s*\"?c:)" + re.escape(owner_tag) + r"\b",
+															r"\g<1>" + clean_old,
+															entry_text,
+															flags=re.IGNORECASE
+														)
 												elif entry_tag and entry_tag not in involved_tags and not self.get_states_owned_by_country(entry_tag):
 													entry_text = self.get_ownership_content(b_type, owner_tag, entry_levels, state_name)
 												new_entries.append(entry_text)
@@ -1844,37 +1849,16 @@ class Vic3Logic:
 						if "owned_provinces" in new_c:
 							npm = re.search(r"owned_provinces\s*=\s*\{", new_c)
 							ns, ne = self.find_block_content(new_c, npm.end()-1)
-							inner = new_c[ns+1:ne-1]
-							if '\n' in inner:
-								# Multi-line: detect indentation from existing province lines
-								prov_indent = "\t\t\t\t\t"
-								for line in inner.split('\n'):
-									if line.strip():
-										prov_indent = re.match(r'^(\s*)', line).group(1)
-										break
-								# Detect closing brace indentation from whitespace before }
-								close_indent = "\t\t\t\t"
-								before_close = new_c[:ne-1]
-								last_nl = before_close.rfind('\n')
-								if last_nl >= 0 and not before_close[last_nl+1:].strip():
-									close_indent = before_close[last_nl+1:]
-								formatted_provinces = self._indent_multiline_value(provinces, prov_indent)
-								new_c = new_c[:ne-1].rstrip() + f"\n{formatted_provinces}\n{close_indent}" + new_c[ne-1:]
-							else:
-								# Inline format: convert to multi-line, inferring indentation from 'country' line
-								country_m = re.search(r'^(\s*)country\s*=', new_c, re.MULTILINE)
-								if country_m:
-									base_indent = country_m.group(1)
-									prov_indent = base_indent + '\t'
-									close_indent = base_indent
-								else:
-									prov_indent = "\t\t\t\t\t"
-									close_indent = "\t\t\t\t"
-								existing = inner.strip()
-								formatted_existing = self._indent_multiline_value(existing, prov_indent)
-								formatted_provinces = self._indent_multiline_value(provinces, prov_indent)
-								new_block = f"\n{formatted_existing}\n{formatted_provinces}\n{close_indent}"
-								new_c = new_c[:ns+1] + new_block + new_c[ne-1:]
+							# Derive indentation from the 'country = c:...' line (same level as owned_provinces)
+							country_m = re.search(r'^(\s*)country\s*=', new_c, re.MULTILINE)
+							indent = country_m.group(1) if country_m else "\t\t\t"
+							prov_indent = indent + '\t'
+							# Normalize existing provinces and new provinces, then re-indent each line
+							existing_fmt = self._indent_multiline_value(new_c[ns+1:ne-1].strip(), prov_indent)
+							new_fmt = self._indent_multiline_value(provinces, prov_indent)
+							# Replace the entire owned_provinces block with a fresh, properly formatted one
+							new_op = f"owned_provinces = {{\n{existing_fmt}\n{new_fmt}\n{indent}}}"
+							new_c = new_c[:npm.start()] + new_op + new_c[ne:]
 						else:
 							lb = new_c.rfind('}')
 							new_c = new_c[:lb] + f"\n\t\towned_provinces = {{\n\t\t\t{provinces}\n\t\t}}\n" + new_c[lb:]
