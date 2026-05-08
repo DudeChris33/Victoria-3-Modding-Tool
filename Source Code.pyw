@@ -1247,9 +1247,12 @@ class Vic3Logic:
 						if match:
 							scope_id = match.group(2)
 							if scope_id not in valid_scopes:
-								new_lines.append(f"# {line.strip()} (FIXED: Orphaned link)")
-								orphans_removed += 1
-								file_changed = True
+								if not line.lstrip().startswith('#'):
+									new_lines.append(f"# {line.strip()} (FIXED: Orphaned link)")
+									orphans_removed += 1
+									file_changed = True
+								else:
+									new_lines.append(line)
 							else:
 								new_lines.append(line)
 						else:
@@ -2473,7 +2476,7 @@ class Vic3Logic:
 
 				if existing_fm_insert is not None:
 					self.log(f"      [MERGE] Merging {len(units)} unit(s) into existing {f_type} ({sr_key}) for c:{new_tag}")
-					units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
+					units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 4)
 					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
 					first_fm_scope = first_fm_scope or existing_fm_scope
 				else:
@@ -2517,7 +2520,7 @@ class Vic3Logic:
 								if oc_sc_m: found_oc_scope = oc_sc_m.group(1)
 							fi_oc = fi_oc_e
 						if found_oc_insert is not None:
-							units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
+							units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 4)
 							new_oc = oc[:found_oc_insert] + units_text + "\n\t\t" + oc[found_oc_insert:]
 							with open(other_path, 'w', encoding='utf-8-sig') as fh2: fh2.write(new_oc)
 							first_fm_scope = first_fm_scope or found_oc_scope
@@ -2529,13 +2532,14 @@ class Vic3Logic:
 						immersive_name = self.generate_immersive_name(sr_key, f_type)
 						region_slug = sr_key.replace("region_", "").replace("water_body_", "")
 						new_fm_scope = f"auto_{f_type}_{region_slug}_{new_tag.lower()}"
-						unit_str = "\n" + indent_units(units, 3)
+						unit_str = "\n" + indent_units(units, 4)
+						scope_line = f"\n\t\t\tsave_scope_as = {new_fm_scope}" if general_buffer else ""
 						block_str = (
 							f"\n\t\tcreate_military_formation = {{"
 							f"\n\t\t\tname = {immersive_name}"
 							f"\n\t\t\ttype = {f_type}"
 							f"\n\t\t\thq_region = {hq_region_val}"
-							f"\n\t\t\tsave_scope_as = {new_fm_scope}"
+							f"{scope_line}"
 							f"\n\t\t\t# Transferred Units"
 							f"{unit_str}"
 							f"\n\t\t}}"
@@ -2544,7 +2548,8 @@ class Vic3Logic:
 						if last_tag_pos != -1:
 							_, end_brace = self.find_block_content(file_content, last_tag_pos)
 							insert_pos = end_brace - 1
-							file_content = file_content[:insert_pos] + "\n" + block_str + "\n" + file_content[insert_pos:]
+							prefix = file_content[:insert_pos].rstrip('\t ')
+							file_content = prefix + "\n" + block_str + "\n\t" + file_content[insert_pos:]
 						else:
 							mf_start, mf_end = self.get_block_range_safe(file_content, "MILITARY_FORMATIONS")
 							if mf_start is not None:
@@ -5359,17 +5364,19 @@ class Vic3Logic:
 						if state not in result:
 							result[state] = {}
 						result[state].update(owner_map)
-			return result
+		return result
 
 	def compute_states_diff(self, imported_path):
 		"""Compare imported history/states file against current mod.
 		Returns [(state_name, old_tag, new_tag)].
 		Pass 1: fast owner-set diff via scan_state_region_owners.
-		Pass 2: province-id overlap scan, only for ambiguous consolidation cases
-		        (multiple remaining owners, removed owner absorbed by one of them)."""
+		  Fast-path only for trivially unambiguous 1-to-1 swaps.
+		  Everything else is deferred to Pass 2.
+		Pass 2: province-id overlap scan over (added | remaining) recipients."""
 		imported = self.parse_states_file_ownership(imported_path)
 		transfers = []
-		ambiguous = []  # (state_name, imported_owner_map, removed, remaining)
+		# (state_name, imported_owner_map, removed_set, recipients_set)
+		ambiguous = []
 		
 		# Pass 1: owner-set diff -- no province data needed
 		for state_name, imported_owner_map in sorted(imported.items()):
@@ -5378,31 +5385,28 @@ class Vic3Logic:
 				continue
 			imported_owners = set(imported_owner_map.keys())
 			removed = current_owners - imported_owners
-			added = imported_owners - current_owners
+			added   = imported_owners - current_owners
 			if not removed:
 				continue
-			if added:
-				if len(added) > 1:
-					continue
-				new_tag = next(iter(added))
-				for old_tag in sorted(removed):
-					transfers.append((state_name, old_tag, new_tag))
+			remaining = current_owners & imported_owners
+			recipients = added | remaining
+			if not recipients:
+				continue
+			# Fast path: exactly one removed and one added -- unambiguous direct swap
+			if len(removed) == 1 and len(added) == 1:
+				transfers.append((state_name, next(iter(removed)), next(iter(added))))
+			# Fast path: exactly one removed, no new owner, exactly one remaining absorber
+			elif len(removed) == 1 and not added and len(remaining) == 1:
+				transfers.append((state_name, next(iter(removed)), next(iter(remaining))))
 			else:
-				remaining = current_owners & imported_owners
-				if not remaining:
-					continue
-				if len(remaining) == 1:
-					new_tag = next(iter(remaining))
-					for old_tag in sorted(removed):
-						transfers.append((state_name, old_tag, new_tag))
-				else:
-					ambiguous.append((state_name, imported_owner_map, removed, remaining))
+				# Anything more complex: defer to province-id comparison
+				ambiguous.append((state_name, imported_owner_map, removed, recipients))
 		
 		# Pass 2: province overlap -- only reached when ambiguous cases exist
 		if ambiguous:
 			ambig_states = {s for s, _, _, _ in ambiguous}
 			current_provs = self._load_province_ownership(ambig_states)
-			for state_name, imported_owner_map, removed, remaining in ambiguous:
+			for state_name, imported_owner_map, removed, recipients in ambiguous:
 				current_owner_map = current_provs.get(state_name, {})
 				for old_tag in sorted(removed):
 					old_provs = current_owner_map.get(old_tag, frozenset())
@@ -5410,12 +5414,14 @@ class Vic3Logic:
 						continue
 					best_match = None
 					best_overlap = 0
-					for rem in remaining:
-						gained = imported_owner_map.get(rem, frozenset()) - current_owner_map.get(rem, frozenset())
+					for rec in recipients:
+						# Provinces gained = what rec has in imported minus what it had before
+						# For new owners (not in current) current provinces = empty set
+						gained = imported_owner_map.get(rec, frozenset()) - current_owner_map.get(rec, frozenset())
 						overlap = len(gained & old_provs)
 						if overlap > best_overlap:
 							best_overlap = overlap
-							best_match = rem
+							best_match = rec
 					if best_match:
 						transfers.append((state_name, old_tag, best_match))
 		return transfers
