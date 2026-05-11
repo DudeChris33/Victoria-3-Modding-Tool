@@ -2476,7 +2476,7 @@ class Vic3Logic:
 
 				if existing_fm_insert is not None:
 					self.log(f"      [MERGE] Merging {len(units)} unit(s) into existing {f_type} ({sr_key}) for c:{new_tag}")
-					units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 4)
+					units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
 					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
 					first_fm_scope = first_fm_scope or existing_fm_scope
 				else:
@@ -2520,7 +2520,7 @@ class Vic3Logic:
 								if oc_sc_m: found_oc_scope = oc_sc_m.group(1)
 							fi_oc = fi_oc_e
 						if found_oc_insert is not None:
-							units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 4)
+							units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
 							new_oc = oc[:found_oc_insert] + units_text + "\n\t\t" + oc[found_oc_insert:]
 							with open(other_path, 'w', encoding='utf-8-sig') as fh2: fh2.write(new_oc)
 							first_fm_scope = first_fm_scope or found_oc_scope
@@ -2532,7 +2532,7 @@ class Vic3Logic:
 						immersive_name = self.generate_immersive_name(sr_key, f_type)
 						region_slug = sr_key.replace("region_", "").replace("water_body_", "")
 						new_fm_scope = f"auto_{f_type}_{region_slug}_{new_tag.lower()}"
-						unit_str = "\n" + indent_units(units, 4)
+						unit_str = "\n" + indent_units(units, 3)
 						scope_line = f"\n\t\t\tsave_scope_as = {new_fm_scope}" if general_buffer else ""
 						block_str = (
 							f"\n\t\tcreate_military_formation = {{"
@@ -7634,6 +7634,156 @@ class Vic3Logic:
 					data['members'] = new_members
 					self.save_power_bloc_data(leader, data)
 
+	# ── Diplomatic reference cleanup ───────────────────────────────────────────
+
+	def _comment_out_block_text(self, text):
+		"""Prefix each non-empty, non-already-commented line with '# '."""
+		lines = text.split('\n')
+		return '\n'.join(
+			('# ' + line) if (line.strip() and not line.lstrip().startswith('#')) else line
+			for line in lines
+		)
+
+	def _comment_blocks_mentioning_tag(self, content, block_re, tag_re):
+		"""
+		Find blocks whose opener matches block_re. For each block that contains
+		a reference matching tag_re, comment out the entire block. Skips
+		already-commented lines.
+		"""
+		parts = []
+		cursor = 0
+		while True:
+			m = block_re.search(content[cursor:])
+			if not m:
+				parts.append(content[cursor:])
+				break
+			abs_start = cursor + m.start()
+			# Skip if this line is already commented out
+			line_nl = content.rfind('\n', 0, abs_start)
+			line_start = (line_nl + 1) if line_nl >= 0 else 0
+			if content[line_start:abs_start].lstrip().startswith('#'):
+				cursor = cursor + m.end()
+				continue
+			# block_text starts exactly at the matched opener — never reaches back
+			# past a prior wrapper line (e.g. "DIPLOMACY = {") even when line_start
+			# coincides with cursor or with an earlier line.
+			extract_start = abs_start
+			brace_pos = cursor + m.end() - 1
+			_, block_end = self.find_block_content(content, brace_pos)
+			if block_end:
+				block_text = content[extract_start:block_end]
+				if tag_re.search(block_text):
+					parts.append(content[cursor:extract_start])
+					parts.append(self._comment_out_block_text(block_text))
+				else:
+					parts.append(content[cursor:block_end])
+				cursor = block_end
+			else:
+				cursor = brace_pos + 1
+		return ''.join(parts)
+
+	def cleanup_diplomatic_references(self, old_tag):
+		"""
+		When old_tag ceases to exist, comments out all blocks that mention it in:
+		  common/history/diplomacy/
+		  common/history/treaties/
+		  common/history/power_blocs/
+		  common/history/diplomatic_plays/
+		For diplomacy and power_blocs, also handles inner sub-blocks and member lines.
+		"""
+		clean_tag = old_tag.replace("c:", "").strip()
+		tag_re = re.compile(r"\bc:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
+		country_block_re = re.compile(r"c:" + re.escape(clean_tag) + r"\s*\??=\s*\{", re.IGNORECASE)
+		member_re = re.compile(r"member\s*=\s*c:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
+
+		# (rel_dir, top_block_re or None, do_inner_scan, do_member_lines)
+		dir_configs = [
+			("common/history/diplomacy",
+			 country_block_re, True, False),
+			("common/history/treaties",
+			 re.compile(r"create_treaty\s*=\s*\{"), False, False),
+			("common/history/power_blocs",
+			 country_block_re, False, True),
+			("common/history/diplomatic_plays",
+			 re.compile(r"create_diplomatic_play\s*=\s*\{"), False, False),
+		]
+
+		for rel_dir, top_re, do_inner, do_member in dir_configs:
+			dir_path = os.path.join(self.mod_path, rel_dir)
+			if not os.path.exists(dir_path):
+				continue
+			for root, _, files in os.walk(dir_path):
+				for file in files:
+					if not file.endswith(".txt"):
+						continue
+					fpath = os.path.join(root, file)
+					try:
+						with open(fpath, 'r', encoding='utf-8-sig') as f:
+							file_content = f.read()
+					except:
+						with open(fpath, 'r', encoding='utf-8') as f:
+							file_content = f.read()
+
+					if not tag_re.search(file_content):
+						continue
+
+					new_content = file_content
+
+					# Step 1: comment out top-level blocks matching top_re that mention the tag
+					new_content = self._comment_blocks_mentioning_tag(new_content, top_re, tag_re)
+
+					# Step 2 (diplomacy): inside c:OTHER ?= {...} blocks, comment out
+					# any child sub-block that mentions the ceased tag
+					if do_inner:
+						inner_block_re = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*\{")
+						other_re = re.compile(r"c:([A-Za-z0-9_]+)\s*\??=\s*\{", re.IGNORECASE)
+						parts = []
+						cursor = 0
+						while True:
+							m = other_re.search(new_content[cursor:])
+							if not m:
+								parts.append(new_content[cursor:])
+								break
+							abs_start = cursor + m.start()
+							# Skip commented lines
+							line_nl = new_content.rfind('\n', 0, abs_start)
+							ls = (line_nl + 1) if line_nl >= 0 else 0
+							if new_content[ls:abs_start].lstrip().startswith('#'):
+								cursor = cursor + m.end()
+								continue
+							brace_pos = cursor + m.end() - 1
+							s_inner, e_inner = self.find_block_content(new_content, brace_pos)
+							if s_inner and e_inner:
+								inner = new_content[s_inner+1:e_inner-1]
+								if tag_re.search(inner):
+									new_inner = self._comment_blocks_mentioning_tag(inner, inner_block_re, tag_re)
+									parts.append(new_content[cursor:s_inner+1])
+									parts.append(new_inner)
+									parts.append(new_content[e_inner-1:e_inner])
+								else:
+									parts.append(new_content[cursor:e_inner])
+								cursor = e_inner
+							else:
+								cursor = brace_pos + 1
+						new_content = ''.join(parts)
+
+					# Step 3 (power_blocs): comment out individual member = c:TAG lines
+					if do_member:
+						lines = new_content.split('\n')
+						new_lines = []
+						for line in lines:
+							stripped = line.lstrip()
+							if member_re.search(line) and not stripped.startswith('#'):
+								new_lines.append('# ' + line)
+							else:
+								new_lines.append(line)
+						new_content = '\n'.join(new_lines)
+
+					if new_content != file_content:
+						with open(fpath, 'w', encoding='utf-8-sig') as f:
+							f.write(new_content)
+						self.log(f"   [CLEAN] Commented out {clean_tag} references in {rel_dir}/{file}")
+
 	def fix_set_capital_after_transfer(self, old_owners, transferred_states):
 		"""
 		After transferring states away from one or more countries, check each donor's
@@ -7745,10 +7895,9 @@ class Vic3Logic:
 	def perform_annexation_cleanup(self, old_tag, new_tag, transferred_states):
 		self.log(f"--- Performing Annexation Cleanup: {old_tag} -> {new_tag} ---", 'info')
 		self.cleanup_trade_routes(old_tag)
-		self.cleanup_treaties(old_tag)
 		self.update_companies(old_tag, new_tag)
 		self.update_military_formations(old_tag, new_tag)
-		self.cleanup_power_bloc_membership(old_tag)
+		self.cleanup_diplomatic_references(old_tag)
 		self.fix_set_capital_after_transfer([old_tag], transferred_states)
 		self.clean_transferred_state_references(transferred_states, new_tag=new_tag)
 		self.sanitize_buildings(old_tag, new_tag, transferred_states)
