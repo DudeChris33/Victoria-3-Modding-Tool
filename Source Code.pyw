@@ -630,8 +630,8 @@ class Vic3Logic:
 						break
 
 			lines = [
-				"effect_starting_technology_tier_2_tech = yes",
-				"effect_starting_politics_conservative = yes"
+				"effect_starting_technology_tier_4_tech = yes",
+				"effect_starting_politics_traditional = yes"
 			]
 			if has_railway:
 				lines.append("add_technology_researched = railways")
@@ -1604,7 +1604,7 @@ class Vic3Logic:
 						if tm: b_type = tm.group(1).lower()
 
 						# SKIP Subsistence Farms and other auto-managed buildings to prevent crashes
-						if b_type in ["building_subsistence_farms", "building_urban_center", "building_trade_center"]:
+						if b_type in ["building_subsistence_farms", "building_urban_center"]:
 							reordered_cb = self.rebuild_create_building_block(inner_region[cb_abs_start:cb_s+1], cb_inner)
 							if reordered_cb != cb_full:
 								new_inner_parts.append(reordered_cb)
@@ -1719,6 +1719,16 @@ class Vic3Logic:
 												continue
 
 											if is_involved:
+												# Without the blanket sub, old-owner same-state entries arrive as c:old_tag.
+												# Rename them to owner_tag so ownership transfers correctly.
+												if clean_old and entry_tag == clean_old.upper() and entry_tag != owner_tag.upper():
+													entry_text = re.sub(
+														r"(country\s*=\s*\"?c:)" + re.escape(clean_old) + r"\b",
+														r"\g<1>" + owner_tag,
+														entry_text,
+														flags=re.IGNORECASE
+													)
+													entries_changed = entries_changed or (entry_text != entry["text"])
 												new_entries.append(entry_text)
 												continue
 
@@ -1802,9 +1812,12 @@ class Vic3Logic:
 
 	def sanitize_block_content(self, content, state_str, old_tag, new_tag, is_building_file):
 		content = re.sub(r"region_state:\s*(c:)?" + re.escape(old_tag), f"region_state:{new_tag}", content, flags=re.IGNORECASE)
-		content = re.sub(f"c:{re.escape(old_tag)}", f"c:{new_tag}", content, flags=re.IGNORECASE)
+		if not is_building_file:
+			# For non-building files a blanket c:TAG rename is safe.
+			content = re.sub(f"c:{re.escape(old_tag)}", f"c:{new_tag}", content, flags=re.IGNORECASE)
 		if is_building_file:
-			# Fix ownership contextually; no blanket region substitution (would clobber cross-state refs)
+			# Building files: let fix_building_ownership handle all ownership tag changes
+			# contextually so cross-state refs (region != state_str) are never corrupted.
 			clean_new = new_tag.replace("c:", "").strip()
 			content = self.fix_building_ownership(content, clean_new, state_str, old_tag=old_tag)
 		return content
@@ -5023,7 +5036,7 @@ class Vic3Logic:
 										if tm: b_type = tm.group(1)
 
 										# Auto-managed buildings must never have ownership patched
-										if b_type in ["building_subsistence_farms", "building_urban_center", "building_trade_center"]:
+										if b_type in ["building_subsistence_farms", "building_urban_center"]:
 											new_rs_parts.append(b_full)
 											b_cursor = bs_e
 											continue
@@ -7637,12 +7650,17 @@ class Vic3Logic:
 	# ── Diplomatic reference cleanup ───────────────────────────────────────────
 
 	def _comment_out_block_text(self, text):
-		"""Prefix each non-empty, non-already-commented line with '# '."""
+		"""Prefix each non-empty, non-already-commented line with '# ' after leading whitespace."""
 		lines = text.split('\n')
-		return '\n'.join(
-			('# ' + line) if (line.strip() and not line.lstrip().startswith('#')) else line
-			for line in lines
-		)
+		result = []
+		for line in lines:
+			stripped = line.lstrip()
+			if stripped and not stripped.startswith('#'):
+				indent = line[:len(line) - len(stripped)]
+				result.append(indent + '# ' + stripped)
+			else:
+				result.append(line)
+		return '\n'.join(result)
 
 	def _comment_blocks_mentioning_tag(self, content, block_re, tag_re):
 		"""
@@ -7662,6 +7680,7 @@ class Vic3Logic:
 			line_nl = content.rfind('\n', 0, abs_start)
 			line_start = (line_nl + 1) if line_nl >= 0 else 0
 			if content[line_start:abs_start].lstrip().startswith('#'):
+				parts.append(content[cursor:cursor + m.end()])
 				cursor = cursor + m.end()
 				continue
 			# block_text starts exactly at the matched opener — never reaches back
@@ -7749,6 +7768,7 @@ class Vic3Logic:
 							line_nl = new_content.rfind('\n', 0, abs_start)
 							ls = (line_nl + 1) if line_nl >= 0 else 0
 							if new_content[ls:abs_start].lstrip().startswith('#'):
+								parts.append(new_content[cursor:cursor + m.end()])
 								cursor = cursor + m.end()
 								continue
 							brace_pos = cursor + m.end() - 1
