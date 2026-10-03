@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:ION ?= {
-		create_character = {
-			template = ION_howard_douglas
-		}	
-	}
-}

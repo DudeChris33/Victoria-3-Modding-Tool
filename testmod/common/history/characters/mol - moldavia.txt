@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:MOL ?= {
-		create_character = {
-			template = MOL_mihail_sturdza
-		}	
-	}
-}

@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:TGR ?= {
-		create_character = {
-			template = TGR_wube_haile_maryam
-		}	
-	}
-}

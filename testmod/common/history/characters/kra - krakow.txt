@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:KRA ?= {
-		create_character = {
-			template = KRA_kasper_wieloglowski
-		}	
-	}
-}

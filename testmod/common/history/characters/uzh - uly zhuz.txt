@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:UZH ?= {
-		create_character = {
-			template = UZH_konurkuldzha_kudaimendin
-		}
-	}
-}

@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:OZH ?= {
-		create_character = {
-			template = OZH_suyuk_abylaikhanov
-		}
-	}
-}

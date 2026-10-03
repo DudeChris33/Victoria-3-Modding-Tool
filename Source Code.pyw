@@ -27,7 +27,7 @@ class Vic3Logic:
 	CAT_A_STATE = [
 		"building_government_administration", "building_construction_sector",
 		"building_university",
-		"building_barrack", "building_conscription_center", "building_naval_base",
+		"building_barrack", "building_conscription_center", "building_naval_administration",
 		"building_port", "building_railway", "building_power_plant",
 	]
 	CAT_B_SELF = [
@@ -56,7 +56,7 @@ class Vic3Logic:
 		"building_food_industry", "building_textile_mill", "building_furniture_manufactory", "building_glassworks",
 		"building_tooling_workshop", "building_paper_mill", "building_chemical_plant", "building_explosives_factory",
 		"building_synthetics_plant", "building_steel_mill", "building_motor_industry", "building_shipyard",
-		"building_military_shipyard", "building_automotive_industry", "building_electrics_industry",
+		"building_automotive_industry", "building_electrics_industry",
 		"building_arms_industry", "building_artillery_foundry", "building_munition_plant",
 	]
 

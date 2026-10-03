@@ -1,5 +1,0 @@
-﻿CHARACTERS = {
-	c:KAU ?= {
-		# Handled automatically
-	}
-}

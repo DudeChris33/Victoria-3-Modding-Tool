@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:GLD ?= {
-		create_character = {
-			template = GLD_yuusuf_maxamuud_ibrahiim_gobroon
-		}
-	}
-}

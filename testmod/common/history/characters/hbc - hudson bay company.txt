@@ -1,3 +1,0 @@
-﻿CHARACTERS = {
-	# HBC_george_simpson is generated in GBR
-}

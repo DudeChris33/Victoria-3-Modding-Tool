@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:KAT ?= {
-		create_character = {
-			template = KAT_ghalib_al_kathir
-		}	
-	}
-}

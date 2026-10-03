@@ -1,7 +1,0 @@
-﻿CHARACTERS = {
-	c:KAN ?= {
-		create_character = {
-			template = KAN_kohan_barakzai
-		}
-	}
-}
