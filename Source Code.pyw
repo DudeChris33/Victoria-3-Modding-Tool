@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import shutil
 import traceback
@@ -67,6 +67,9 @@ class Vic3Logic:
 		self.auto_backup_enabled = False
 		self.stop_event = threading.Event()
 		self.state_manager = StateManager(self)
+		self._scan_state_owners_cache = {}
+		self._country_has_states_cache = {}
+		self._get_all_owned_states_cache = {}
 
 	def set_mod_path(self, path):
 		self.mod_path = path
@@ -1029,6 +1032,46 @@ class Vic3Logic:
 						return hr_m.group(1).strip()
 		return None
 
+	def update_character_template_hq(self, template_name, new_hq_region):
+		"""Update the hq field in a character template if it exists."""
+		if not template_name or not new_hq_region:
+			return
+		tmpl_dir = os.path.join(self.mod_path, "common", "character_templates")
+		if not os.path.exists(tmpl_dir):
+			return
+		clean_hq = new_hq_region.replace("sr:", "").strip()
+		for root, _, files in os.walk(tmpl_dir):
+			for file in files:
+				if not file.endswith(".txt"):
+					continue
+				path = os.path.join(root, file)
+				try:
+					with open(path, "r", encoding="utf-8-sig") as fh: fc = fh.read()
+				except:
+					try:
+						with open(path, "r", encoding="utf-8") as fh: fc = fh.read()
+					except:
+						continue
+				tm = re.search(re.escape(template_name) + r"\s*=\s*\{", fc)
+				if not tm:
+					continue
+				s_idx, e_idx = self.find_block_content(fc, tm.end() - 1)
+				if s_idx is None:
+					continue
+				block = fc[s_idx:e_idx]
+				if not re.search(r"\bhq\s*=", block, re.IGNORECASE):
+					return
+				new_block = re.sub(
+					r"\bhq\s*=\s*(?:sr:)?[A-Za-z0-9_]+",
+					f"hq = sr:{clean_hq}",
+					block, count=1, flags=re.IGNORECASE
+				)
+				new_fc = fc[:s_idx] + new_block + fc[e_idx:]
+				with open(path, "w", encoding="utf-8") as fh:
+					fh.write(new_fc)
+				self.log(f"      [GEN] Updated hq in template {template_name} -> sr:{clean_hq}")
+				return
+
 	def get_states_in_region(self, region_name):
 		"""Parses common/strategic_regions to find states in a region."""
 		clean_region = region_name.replace("sr:", "").strip()
@@ -1264,11 +1307,19 @@ class Vic3Logic:
 			self.log(f"[SUCCESS] Removed {orphans_removed} orphaned links.", 'success')
 
 	def get_all_owned_states(self, tag):
-		states_found = []
 		states_dir = os.path.join(self.mod_path, "common/history/states")
 		if not os.path.exists(states_dir):
 			return []
 		clean_tag = tag.replace("c:", "").strip()
+		cache_key = clean_tag.upper()
+		if cache_key in self._get_all_owned_states_cache:
+			return self._get_all_owned_states_cache[cache_key]
+
+		states_found = []
+		tag_pat = re.compile(r"country\s*=\s*c:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
+		state_pat = re.compile(r"(?:^|\s)s:(STATE_[A-Za-z0-9_]+)\s*(?:\?=|:|=)\s*\{", re.MULTILINE)
+		cs_pat = re.compile(r"create_state\s*=\s*\{")
+
 		for root, _, files in os.walk(states_dir):
 			if self.stop_event.is_set():
 				return []
@@ -1282,34 +1333,63 @@ class Vic3Logic:
 				except:
 					with open(path, 'r', encoding='utf-8') as f:
 						content = f.read()
-				state_matches = re.finditer(r"s:(STATE_[A-Za-z0-9_]+)\s*=", content)
-				for match in state_matches:
-					state_name = match.group(1)
-					s_start, s_end = self.get_block_range_safe(content, f"s:{state_name}")
-					if s_start is not None:
-						block_content = content[s_start:s_end]
 
-						# Robust check for create_state ownership
-						cursor = 0
-						is_owner = False
-						while True:
-							cs = re.search(r"create_state\s*=\s*\{", block_content[cursor:])
-							if not cs:
+				# Skip files that don't mention the tag at all
+				if not tag_pat.search(content):
+					continue
+
+				for sm in state_pat.finditer(content):
+					state_name = sm.group(1)
+					# Use match position directly — no re-scan from 0
+					sb, se = self.find_block_content(content, sm.end() - 1)
+					if sb is None:
+						continue
+					block_content = content[sb:se]
+					for csm in cs_pat.finditer(block_content):
+						cs_s, cs_e = self.find_block_content(block_content, csm.end() - 1)
+						if cs_s:
+							if tag_pat.search(block_content[cs_s:cs_e]):
+								states_found.append(state_name)
 								break
 
-							cs_s, cs_e = self.find_block_content(block_content, cursor + cs.end() - 1)
-							if cs_s:
-								cs_inner = block_content[cs_s:cs_e]
-								if re.search(r"country\s*=\s*c:" + re.escape(clean_tag) + r"\b", cs_inner, re.IGNORECASE):
-									is_owner = True
-									break
-								cursor = cs_e
-							else:
-								cursor += 1
+		result = list(set(states_found))
+		self._get_all_owned_states_cache[cache_key] = result
+		return result
 
-						if is_owner:
-							states_found.append(state_name)
-		return list(set(states_found))
+	def has_any_owned_state(self, tag):
+		clean_tag = tag.replace("c:", "").strip()
+		cache_key = clean_tag.upper()
+		if cache_key in self._get_all_owned_states_cache:
+			return bool(self._get_all_owned_states_cache[cache_key])
+		states_dir = os.path.join(self.mod_path, "common/history/states")
+		if not os.path.exists(states_dir):
+			return False
+		tag_pat = re.compile(r"country\s*=\s*c:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
+		state_pat = re.compile(r"(?:^|\s)s:(STATE_[A-Za-z0-9_]+)\s*(?:\?=|:|=)\s*\{", re.MULTILINE)
+		cs_pat = re.compile(r"create_state\s*=\s*\{")
+		for root, _, files in os.walk(states_dir):
+			if self.stop_event.is_set():
+				return False
+			for file in files:
+				if not file.endswith(".txt"):
+					continue
+				path = os.path.join(root, file)
+				try:
+					with open(path, 'r', encoding='utf-8-sig') as f: file_content = f.read()
+				except:
+					with open(path, 'r', encoding='utf-8') as f: file_content = f.read()
+				if not tag_pat.search(file_content):
+					continue
+				for sm in state_pat.finditer(file_content):
+					sb, se = self.find_block_content(file_content, sm.end() - 1)
+					if sb is None:
+						continue
+					block_content = file_content[sb:se]
+					for csm in cs_pat.finditer(block_content):
+						cs_s, cs_e = self.find_block_content(block_content, csm.end() - 1)
+						if cs_s and tag_pat.search(block_content[cs_s:cs_e]):
+							return True
+		return False
 
 	def get_ownership_content(self, building_type, owner_tag, level, state_name):
 		"""Returns the inner content for an ownership block."""
@@ -1570,8 +1650,8 @@ class Vic3Logic:
 				m = pat.search(block_content, cursor)
 				if not m: break
 
-				region_start = cursor + m.start()
-				_, region_end = self.find_block_content(block_content, cursor + m.end() - 1)
+				region_start = m.start()
+				_, region_end = self.find_block_content(block_content, m.end() - 1)
 				if not region_end:
 					cursor = region_start + 1
 					continue
@@ -2010,8 +2090,8 @@ class Vic3Logic:
 				pat = re.compile(r"(?:^|\s)c:([A-Za-z0-9_]+)\s*(\?=|:|=)?\s*\{")
 				m = pat.search(content, current_search_idx)
 				if m:
-					tag_start = current_search_idx + m.start()
-					_, c_end_val = self.find_block_content(content, current_search_idx + m.end() - 1)
+					tag_start = m.start()
+					_, c_end_val = self.find_block_content(content, m.end() - 1)
 					if c_end_val:
 						c_start = tag_start
 						c_end = c_end_val
@@ -2229,8 +2309,7 @@ class Vic3Logic:
 			inner_reconstructed = "".join(new_inner_parts)
 
 			# Check if source country still exists after transfers
-			remaining_states = self.get_all_owned_states(found_tag) if found_tag else ["placeholder"]
-			country_ceases = not bool(remaining_states)
+			country_ceases = bool(found_tag) and not self.has_any_owned_state(found_tag)
 
 			if country_ceases:
 				# Case 3: source country no longer exists
@@ -2449,6 +2528,7 @@ class Vic3Logic:
 					self.log(f"      [WARN] Could not resolve strategic region for a unit. Skipping.", 'warn')
 
 			first_fm_scope = None  # used to link generals
+			first_fm_hq = None
 
 			# --- Per-region: merge into matching existing formation or create new ---
 			for sr_key, units in region_units.items():
@@ -2456,11 +2536,13 @@ class Vic3Logic:
 
 				# Re-find c:{new_tag} block (positions shift after each insertion)
 				last_tag_pos = -1
+				last_tag_end = -1
 				curr = 0
 				while True:
 					ns, ne = self.get_block_range_safe(file_content, f"c:{new_tag}", curr)
 					if ns is None: break
 					last_tag_pos = ns
+					last_tag_end = ne
 					curr = ne
 
 				# Search for existing formation: same type AND matching hq_region
@@ -2492,6 +2574,7 @@ class Vic3Logic:
 					units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
 					file_content = file_content[:existing_fm_insert] + units_text + "\n\t\t" + file_content[existing_fm_insert:]
 					first_fm_scope = first_fm_scope or existing_fm_scope
+					first_fm_hq = first_fm_hq or sr_key
 				else:
 					# Before creating, check all other mil files for existing matching formation
 					mil_dir_inj = os.path.dirname(filepath)
@@ -2537,6 +2620,7 @@ class Vic3Logic:
 							new_oc = oc[:found_oc_insert] + units_text + "\n\t\t" + oc[found_oc_insert:]
 							with open(other_path, 'w', encoding='utf-8-sig') as fh2: fh2.write(new_oc)
 							first_fm_scope = first_fm_scope or found_oc_scope
+							first_fm_hq = first_fm_hq or sr_key
 							self.log(f"      [MERGE] Merging {len(units)} unit(s) into existing {f_type} in {other_fn} for c:{new_tag}")
 							injected_other = True
 							break
@@ -2559,8 +2643,7 @@ class Vic3Logic:
 						)
 						self.log(f"      [CREATE] Creating {f_type} formation ({immersive_name}) for c:{new_tag}")
 						if last_tag_pos != -1:
-							_, end_brace = self.find_block_content(file_content, last_tag_pos)
-							insert_pos = end_brace - 1
+							insert_pos = last_tag_end - 1
 							prefix = file_content[:insert_pos].rstrip('\t ')
 							file_content = prefix + "\n" + block_str + "\n\t" + file_content[insert_pos:]
 						else:
@@ -2571,6 +2654,7 @@ class Vic3Logic:
 							else:
 								file_content = file_content + f"\n\nc:{new_tag} ?= {{\n{block_str}\n}}\n"
 						first_fm_scope = first_fm_scope or new_fm_scope
+					first_fm_hq = first_fm_hq or sr_key
 
 			# --- Inject generals into the first formation created/merged ---
 			if general_buffer:
@@ -2593,6 +2677,9 @@ class Vic3Logic:
 								f"\n\t\ttransfer_to_formation = scope:{first_fm_scope}"
 								f"\n\t}}"
 							)
+						tpl_m = re.search(r"template\s*=\s*([A-Za-z0-9_]+)", char_block, re.IGNORECASE)
+						if tpl_m and first_fm_hq:
+							self.update_character_template_hq(tpl_m.group(1), first_fm_hq)
 					file_content = file_content[:insert_pos2] + gen_str + "\n" + file_content[insert_pos2:]
 
 			return file_content
@@ -2606,6 +2693,12 @@ class Vic3Logic:
 		if has_wrapper_orig and not re.search(r"(?:^|\s)MILITARY_FORMATIONS\s*=", new_file_content):
 			self.log("[FIX] Restoring missing MILITARY_FORMATIONS wrapper (final guard).", 'warn')
 			new_file_content = f"MILITARY_FORMATIONS = {{\n{new_file_content}\n}}"
+		elif has_wrapper_orig and not new_file_content.lstrip('\ufeff').startswith("MILITARY_FORMATIONS"):
+			self.log("[FIX] MILITARY_FORMATIONS wrapper not at file start. Rebuilding.", 'warn')
+			stripped = re.sub(r"(?s)^[\s\ufeff]*MILITARY_FORMATIONS\s*=\s*\{(.*)\}\s*$", r"\1", new_file_content.strip())
+			if stripped == new_file_content.strip():
+				stripped = new_file_content
+			new_file_content = f"MILITARY_FORMATIONS = {{\n{stripped}\n}}"
 
 		with open(filepath, 'w', encoding='utf-8-sig') as f:
 			f.write(new_file_content)
@@ -2864,7 +2957,26 @@ class Vic3Logic:
 			f.write(final_content)
 		self.log(f"[RES] Updated resources for {state_name}", 'success')
 
-	def clean_military_smart(self, old_tag, new_tag, region, state_list, force_move=False, dest_hq_region=None, dest_home_state=None):
+	def _build_mil_file_tag_index(self):
+		"""Scans all military formation files once and returns {filepath: frozenset_of_tags}."""
+		mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
+		index = {}
+		if not os.path.exists(mil_dir):
+			return index
+		tag_pat = re.compile(r"\bc:([A-Za-z0-9_]+)\b")
+		for root, _, files in os.walk(mil_dir):
+			for file in files:
+				if not file.endswith(".txt"):
+					continue
+				path = os.path.join(root, file)
+				try:
+					with open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
+				except:
+					with open(path, 'r', encoding='utf-8') as f: c = f.read()
+				index[path] = frozenset(m.upper() for m in tag_pat.findall(c))
+		return index
+
+	def clean_military_smart(self, old_tag, new_tag, region, state_list, force_move=False, dest_hq_region=None, dest_home_state=None, file_tag_index=None):
 		# Auto-backup usually done before this in transfer flow
 		if not region and not state_list: return
 
@@ -2885,6 +2997,10 @@ class Vic3Logic:
 					if not file.endswith(".txt"):
 						continue
 					filepath = os.path.join(root, file)
+					if old_tag and file_tag_index is not None:
+						clean_old = old_tag.replace('c:', '').strip().upper()
+						if clean_old not in file_tag_index.get(filepath, frozenset()):
+							continue
 					files_processed += 1
 					self.process_military_extraction_multi_pass(filepath, old_tag, new_tag, region, target_states, force_move=force_move, dest_hq_region=dest_hq_region, dest_home_state=dest_home_state)
 
@@ -3002,6 +3118,9 @@ class Vic3Logic:
 					self.log(f"[CHAR] Disconnected commanders in {file}")
 
 	def perform_transfer_sequence(self, states_clean, new_tag, known_old_owners=None, prune_refs=True):
+		self._scan_state_owners_cache.clear()
+		self._country_has_states_cache.clear()
+		self._get_all_owned_states_cache.clear()
 		self.log("--- Processing Map Data ---")
 
 		# 0. Detect Owners (Before Transfer modifies files)
@@ -3035,6 +3154,7 @@ class Vic3Logic:
 		owners_to_pass = known_old_owners if known_old_owners else None
 
 		_, railway_recipients = self.transfer_ownership_batch(states_clean, owners_to_pass, new_tag)
+		self._get_all_owned_states_cache.clear()
 
 		# 1b. Ensure Railway Tech for recipients
 		for r_tag in railway_recipients:
@@ -3054,6 +3174,7 @@ class Vic3Logic:
 			regions_to_process[key].append(state)
 
 		self.log("--- Processing Military Formations ---")
+		mil_tag_index = self._build_mil_file_tag_index()
 
 		for reg_key, states in regions_to_process.items():
 			reg = reg_key if reg_key != "UNKNOWN_REGION" else None
@@ -3074,16 +3195,16 @@ class Vic3Logic:
 
 					if not has_presence and reg:
 						self.log(f"    [INFO] {owner} abandoning {reg}. Force moving all units.")
-						self.clean_military_smart(owner, new_tag, reg, states, force_move=True, dest_home_state=home_state)
+						self.clean_military_smart(owner, new_tag, reg, states, force_move=True, dest_home_state=home_state, file_tag_index=mil_tag_index)
 					else:
 						if reg:
 							self.log(f"    [INFO] {owner} remains in {reg}. Scanning for displaced units.")
 						else:
 							self.log(f"    [INFO] Region unknown for {owner}. Scanning for displaced units only.")
-						self.clean_military_smart(owner, new_tag, reg, states, force_move=False, dest_home_state=home_state)
+						self.clean_military_smart(owner, new_tag, reg, states, force_move=False, dest_home_state=home_state, file_tag_index=mil_tag_index)
 			else:
 				# Fallback: Scan ALL tags
-				self.clean_military_smart(None, new_tag, reg, states, force_move=False, dest_home_state=home_state)
+				self.clean_military_smart(None, new_tag, reg, states, force_move=False, dest_home_state=home_state, file_tag_index=mil_tag_index)
 
 		# 3. Fix set_capital for donors that lost their capital state
 		if target_owners:
@@ -5255,6 +5376,8 @@ class Vic3Logic:
 		"""Scans history/states to find which countries own land (create_state) in the state."""
 		clean_state = self.format_state_clean(state_name)
 		if not clean_state: return []
+		if clean_state in self._scan_state_owners_cache:
+			return self._scan_state_owners_cache[clean_state]
 
 		paths = []
 		if self.mod_path: paths.append(os.path.join(self.mod_path, "common/history/states"))
@@ -5298,8 +5421,12 @@ class Vic3Logic:
 								cursor = cs_e
 							else:
 								cursor += 1
-						return sorted(list(owners))
-		return sorted(list(owners))
+						result = sorted(list(owners))
+						self._scan_state_owners_cache[clean_state] = result
+						return result
+		result = sorted(list(owners))
+		self._scan_state_owners_cache[clean_state] = result
+		return result
 	def parse_states_file_ownership(self, filepath, state_filter=None):
 		"""Parse a common/history/states-format file.
 		Returns {STATE_NAME: {owner_tag: frozenset_of_provinces}}.
@@ -5444,6 +5571,8 @@ class Vic3Logic:
 		clean_tag = tag.upper().replace("C:", "").strip()
 		if not clean_tag:
 			return False
+		if clean_tag in self._country_has_states_cache:
+			return self._country_has_states_cache[clean_tag]
 
 		paths = []
 		if self.mod_path:
@@ -5467,7 +5596,9 @@ class Vic3Logic:
 						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 					if pattern.search(content):
+						self._country_has_states_cache[clean_tag] = True
 						return True
+		self._country_has_states_cache[clean_tag] = False
 		return False
 
 	def get_state_homelands(self, state_name):
@@ -7878,31 +8009,9 @@ class Vic3Logic:
 							idx = e
 							continue
 
-						# Capital was in a transferred state — need to fix it.
-						remaining = self.get_all_owned_states(clean_old)
-						# Normalise remaining list
-						remaining_clean = []
-						for rs in remaining:
-							rk = rs.strip().upper()
-							if rk.startswith("S:"):
-								rk = rk[2:]
-							if not rk.startswith("STATE_"):
-								rk = "STATE_" + rk
-							remaining_clean.append(rk)
-
-						# Remove the transferred state itself from remaining (race condition guard)
-						remaining_clean = [r for r in remaining_clean if r not in clean_transferred]
-
-						if remaining_clean:
-							new_cap = remaining_clean[0]
-							new_block = cap_re.sub(f"set_capital = s:{new_cap}", block, count=1)
-							self.log(f"[CAP] c:{clean_old}: set_capital {cap_state} → {new_cap}", 'info')
-						else:
-							# Country has no states left — drop the set_capital line entirely
-							new_block = cap_re.sub("", block, count=1)
-							# Clean up any blank line left behind
-							new_block = re.sub(r'\n[ \t]*\n', '\n', new_block)
-							self.log(f"[CAP] c:{clean_old}: removed set_capital {cap_state} (no remaining states)", 'warn')
+						# Capital was in a transferred state — comment out the line.
+						new_block = cap_re.sub(lambda m: f"# {m.group(1)}", block, count=1)
+						self.log(f"[CAP] c:{clean_old}: commented out set_capital {cap_state} (no longer owned)", 'warn')
 
 						new_content = new_content[:s] + new_block + new_content[e:]
 						changed = True
@@ -9469,8 +9578,7 @@ class StateManager:
 				m = pat.search(content, cursor)
 				if not m: break
 
-				s_start = cursor + m.start()
-				s_idx, e_idx = self.logic.find_block_content(content, cursor + m.end() - 1)
+				s_idx, e_idx = self.logic.find_block_content(content, m.end() - 1)
 
 				if s_idx:
 					block_content = content[s_idx:e_idx]
@@ -10244,6 +10352,10 @@ class App(tk.Tk):
 		self.tr_old_tag = tk.StringVar()
 		self.tr_old_tag_entry = ttk.Entry(f, textvariable=self.tr_old_tag, width=25)
 		self.tr_old_tag_entry.grid(row=0, column=1, sticky=tk.W, pady=5, padx=5)
+		self.tr_old_tag_blacklist = tk.BooleanVar(value=False)
+		self.tr_old_tag_bl_chk = ttk.Checkbutton(f, text="Blacklist (exclude)", variable=self.tr_old_tag_blacklist, command=self.on_split_blacklist_toggle)
+		self.tr_old_tag_bl_chk.grid(row=0, column=2, sticky=tk.W, pady=5, padx=5)
+		self.tr_old_tag_bl_chk.grid_remove()
 
 		ttk.Label(f, text="New Owner Tag (e.g. gbr):").grid(row=1, column=0, sticky=tk.W, pady=5)
 		self.tr_new_tag = tk.StringVar()
@@ -10282,20 +10394,29 @@ class App(tk.Tk):
 		if mode == "annex":
 			self.tr_states_lbl.grid_remove()
 			self.tr_states.grid_remove()
+			self.tr_old_tag_bl_chk.grid_remove()
 			self.tr_old_tag_lbl.config(text="Old Owner Tag(s) (Space sep):")
 			self.tr_old_tag_lbl.grid()
 			self.tr_old_tag_entry.grid()
 		elif mode == "split":
 			self.tr_states_lbl.grid()
 			self.tr_states.grid()
-			self.tr_old_tag_lbl.config(text="Old Owner Tag (e.g. fra):")
+			self.tr_old_tag_bl_chk.grid()
+			self.on_split_blacklist_toggle()
 			self.tr_old_tag_lbl.grid()
 			self.tr_old_tag_entry.grid()
 		else: # auto
 			self.tr_states_lbl.grid()
 			self.tr_states.grid()
+			self.tr_old_tag_bl_chk.grid_remove()
 			self.tr_old_tag_lbl.grid_remove()
 			self.tr_old_tag_entry.grid_remove()
+
+	def on_split_blacklist_toggle(self):
+		if self.tr_old_tag_blacklist.get():
+			self.tr_old_tag_lbl.config(text="Exclude Owner Tag(s) (Space sep):")
+		else:
+			self.tr_old_tag_lbl.config(text="Old Owner Tag (e.g. fra):")
 
 	# --- MODE 2: CREATE COUNTRY ---
 	def show_create_ui(self):
@@ -11705,19 +11826,25 @@ class App(tk.Tk):
 		raw_st = self.tr_states.get("1.0", tk.END)
 
 		old_tags = []
+		blacklist_mode = False
 		if mode == "annex":
 			parts = old_input.split()
 			old_tags = [self.logic.format_tag_clean(t) for t in parts if t.strip()]
 			if not old_tags: return messagebox.showerror("Error", "Old Owner Tag(s) required for Annexation.")
 		elif mode == "split":
-			tag = self.logic.format_tag_clean(old_input)
-			if not tag: return messagebox.showerror("Error", "Old Owner Tag required for Targeted Transfer.")
-			old_tags = [tag]
+			blacklist_mode = self.tr_old_tag_blacklist.get()
+			if blacklist_mode:
+				parts = old_input.split()
+				old_tags = [self.logic.format_tag_clean(t) for t in parts if t.strip()]
+			else:
+				tag = self.logic.format_tag_clean(old_input)
+				if not tag: return messagebox.showerror("Error", "Old Owner Tag required for Targeted Transfer.")
+				old_tags = [tag]
 
 		self.is_processing = True
 		self.run_btn.config(state='disabled')
 		self.log_area.config(state='normal'); self.log_area.delete('1.0', tk.END); self.log_area.config(state='disabled')
-		threading.Thread(target=self.run_transfer_logic, args=(old_tags, new, mode, raw_st), daemon=True).start()
+		threading.Thread(target=self.run_transfer_logic, args=(old_tags, new, mode, raw_st, blacklist_mode), daemon=True).start()
 
 	def start_create(self):
 		if self.is_processing: return
@@ -11780,7 +11907,7 @@ class App(tk.Tk):
 		threading.Thread(target=self.run_create_logic, args=(tag, name, adj, old_owner, capital, others_raw, rgb, is_annex, cultures, religion, tier, country_type, pop_wealth, pop_lit), daemon=True).start()
 
 	# --- LOGIC THREADS ---
-	def run_transfer_logic(self, old_tags_input, new_tag, mode, raw_states):
+	def run_transfer_logic(self, old_tags_input, new_tag, mode, raw_states, split_blacklist=False):
 		try:
 			if mode == "annex":
 				for old_tag in old_tags_input:
@@ -11794,21 +11921,43 @@ class App(tk.Tk):
 					self.logic.perform_annexation_cleanup(old_tag, new_tag, states_clean)
 
 			elif mode == "split":
-				old_tag = old_tags_input[0]
-				self.log_message(f"--- Processing Targeted Transfer: {old_tag} -> {new_tag} ---", 'info')
 				states_clean = [self.logic.format_state_clean(s) for s in raw_states.split() if s.strip()]
 				if not states_clean: return self.log_message("[ERROR] No states provided.", 'error')
 
-				# Check for full annexation
-				current_owned = self.logic.get_all_owned_states(old_tag)
-				set_current = set(s.upper() for s in current_owned)
-				set_transfer = set(s.upper() for s in states_clean)
-
-				self.logic.perform_transfer_sequence(states_clean, new_tag, known_old_owners=[old_tag])
-
-				if set_current and set_current.issubset(set_transfer):
-					self.log_message(f"[INFO] Full annexation detected for {old_tag} via Split Transfer.", 'info')
-					self.logic.perform_annexation_cleanup(old_tag, new_tag, states_clean)
+				if split_blacklist:
+					# Clear stale cache so owner scan always reads current disk state
+					self.logic._scan_state_owners_cache.clear()
+					self.logic._get_all_owned_states_cache.clear()
+					exclude_set = set(t.upper() for t in old_tags_input)
+					exclude_set.add(new_tag.replace("c:", "").strip().upper())
+					owners_found = set()
+					for state in states_clean:
+						owners_found.update(self.logic.scan_state_region_owners(state))
+					effective_owners = [o for o in owners_found if o.replace("c:", "").strip().upper() not in exclude_set]
+					if not effective_owners:
+						return self.log_message("[ERROR] No owners found after applying exclusion list.", 'error')
+					# Capture pre-transfer ownership for annexation detection (must be before perform_transfer_sequence)
+					set_transfer = set(s.upper() for s in states_clean)
+					pre_transfer_owned = {}
+					for owner in effective_owners:
+						pre_transfer_owned[owner] = set(s.upper() for s in self.logic.get_all_owned_states(owner))
+					self.log_message(f"--- Processing Targeted Transfer (Blacklist): excluded={old_tags_input}, effective owners={effective_owners} -> {new_tag} ---", 'info')
+					self.logic.perform_transfer_sequence(states_clean, new_tag, known_old_owners=effective_owners)
+					for owner in effective_owners:
+						set_current = pre_transfer_owned.get(owner, set())
+						if set_current and not any(s not in set_transfer for s in set_current):
+							self.log_message(f"[INFO] Full annexation detected for {owner} via Blacklist Transfer.", 'info')
+							self.logic.perform_annexation_cleanup(owner, new_tag, states_clean)
+				else:
+					old_tag = old_tags_input[0]
+					self.log_message(f"--- Processing Targeted Transfer: {old_tag} -> {new_tag} ---", 'info')
+					current_owned = self.logic.get_all_owned_states(old_tag)
+					set_current = set(s.upper() for s in current_owned)
+					set_transfer = set(s.upper() for s in states_clean)
+					self.logic.perform_transfer_sequence(states_clean, new_tag, known_old_owners=[old_tag])
+					if set_current and not any(s not in set_transfer for s in set_current):
+						self.log_message(f"[INFO] Full annexation detected for {old_tag} via Split Transfer.", 'info')
+						self.logic.perform_annexation_cleanup(old_tag, new_tag, states_clean)
 
 			else: # auto
 				self.log_message(f"--- Processing Auto-Transfer -> {new_tag} ---", 'info')
@@ -11816,22 +11965,24 @@ class App(tk.Tk):
 				if not states_clean: return self.log_message("[ERROR] No states provided.", 'error')
 
 				# Auto-detect annexation for all affected owners
+				self.log_message("[INFO] Detecting current owners...", 'info')
 				owners_found = set()
 				annex_list = []
 				for state in states_clean:
 					owners = self.logic.scan_state_region_owners(state)
 					owners_found.update(owners)
-				
+
 				# Cleanup self-reference
 				owners_found.discard(new_tag)
 				owners_found.discard(new_tag.replace("c:", "").upper())
 
+				self.log_message(f"[INFO] Checking annexation status for {len(owners_found)} owner(s)...", 'info')
 				for owner in owners_found:
 					current_owned = self.logic.get_all_owned_states(owner)
 					set_current = set(s.upper() for s in current_owned)
 					set_transfer = set(s.upper() for s in states_clean)
 
-					if set_current and set_current.issubset(set_transfer):
+					if set_current and not any(s not in set_transfer for s in set_current):
 						annex_list.append(owner)
 
 				self.logic.perform_transfer_sequence(states_clean, new_tag, known_old_owners=None)
@@ -11881,7 +12032,7 @@ class App(tk.Tk):
 				current_owned = self.logic.get_all_owned_states(old_tag)
 				set_current = set(s.upper() for s in current_owned)
 				set_transfer = set(s.upper() for s in states)
-				if set_current and set_current.issubset(set_transfer):
+				if set_current and not any(s not in set_transfer for s in set_current):
 					annex = True
 				self.logic.perform_transfer_sequence(states, new_tag, known_old_owners=[old_tag])
 				if annex:
@@ -11933,7 +12084,7 @@ class App(tk.Tk):
 				set_current = set(s.upper() for s in current_owned)
 				set_transfer = set(s.upper() for s in all_states)
 				
-				if set_current and set_current.issubset(set_transfer):
+				if set_current and not any(s not in set_transfer for s in set_current):
 					self.log_message(f"[INFO] Full annexation detected (implicit).", 'info')
 					should_cleanup = True
 
