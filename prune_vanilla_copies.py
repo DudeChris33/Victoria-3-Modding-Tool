@@ -7,6 +7,7 @@ Identical = same bytes, or for .txt/.yml same text after ignoring BOM, line endi
 Skipped: .metadata/, anything under the mod's replace_paths (vanilla is not loaded there).
 
 Dry run by default. --apply makes a backup copy of the mod first, then deletes and removes empty folders.
+--no-backup skips that copy (use when the mod is tracked in git).
 
   python prune_vanilla_copies.py "<mod folder>" "<Victoria 3 folder or its game folder>"
   python prune_vanilla_copies.py "<mod folder>" "<Victoria 3 folder>" --apply
@@ -56,6 +57,7 @@ def main():
 	ap.add_argument("mod")
 	ap.add_argument("vanilla")
 	ap.add_argument("--apply", action="store_true", help="actually delete (after backing up the mod)")
+	ap.add_argument("--no-backup", action="store_true", help="skip the _prebackup copy (e.g. the mod is in git)")
 	args = ap.parse_args()
 
 	mod = os.path.abspath(args.mod)
@@ -90,12 +92,13 @@ def main():
 		print("Dry run. Re-run with --apply to delete.")
 		return
 
-	i = 1
-	while os.path.exists(f"{mod}_prebackup_{i}"):
-		i += 1
-	backup = f"{mod}_prebackup_{i}"
-	print(f"Backing up to {backup} ...")
-	shutil.copytree(mod, backup)
+	if not args.no_backup:
+		i = 1
+		while os.path.exists(f"{mod}_prebackup_{i}"):
+			i += 1
+		backup = f"{mod}_prebackup_{i}"
+		print(f"Backing up to {backup} ...")
+		shutil.copytree(mod, backup)
 
 	for p in dupes:
 		os.remove(p)
