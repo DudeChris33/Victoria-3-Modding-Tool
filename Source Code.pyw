@@ -10,6 +10,7 @@ import queue
 import json
 import random
 import colorsys
+import io
 
 try:
 	from PIL import Image, ImageTk, ImageDraw
@@ -21,6 +22,209 @@ except ImportError:
 # =============================================================================
 #  CORE LOGIC
 # =============================================================================
+
+# --- VANILLA FALLBACK (per-mod option) ---
+# When the active mod has use_vanilla_fallback on, files the mod lacks are read from vanilla at
+# the same relative path (mod file shadows vanilla, like the game). Writes to a vanilla-sourced
+# file land in the mod, and only if the content actually changed (copy-on-write). With the option
+# off, every helper below is a pass-through to the builtin.
+_VFS_LOGIC = None
+_builtin_open = open
+_vfs_replace_cache = {}
+
+def _vfs_active():
+	lg = _VFS_LOGIC
+	return bool(lg and lg.use_vanilla_fallback and lg.mod_path and lg.vanilla_path)
+
+def _vfs_vanilla_base():
+	vp = _VFS_LOGIC.vanilla_path
+	g = os.path.join(vp, "game")
+	return g if os.path.isdir(g) else vp
+
+def _vfs_rel(path, base):
+	try:
+		rel = os.path.relpath(os.path.abspath(path), os.path.abspath(base))
+	except ValueError:
+		return None
+	if rel == '.' or rel == '..' or rel.startswith('..' + os.sep):
+		return None
+	return rel
+
+def _vfs_replace_paths():
+	"""replace_paths from the mod's .metadata/metadata.json: vanilla is not loaded under these."""
+	mp = _VFS_LOGIC.mod_path
+	if mp not in _vfs_replace_cache:
+		rps = []
+		try:
+			with _builtin_open(os.path.join(mp, ".metadata", "metadata.json"), 'r', encoding='utf-8-sig') as fh:
+				meta = json.load(fh)
+			for p in (meta.get("game_custom_data", {}) or {}).get("replace_paths", []) or []:
+				rps.append(str(p).replace('\\', '/').strip('/').lower())
+		except Exception:
+			pass
+		_vfs_replace_cache[mp] = rps
+	return _vfs_replace_cache[mp]
+
+def _vfs_is_replaced(rel):
+	r = rel.replace('\\', '/').lower()
+	return any(r == p or r.startswith(p + '/') for p in _vfs_replace_paths())
+
+def _vfs_to_vanilla(path):
+	"""Mod path -> vanilla counterpart, or None if path is not inside the mod / not fallback-eligible."""
+	rel = _vfs_rel(path, _VFS_LOGIC.mod_path)
+	if rel is None or rel.split(os.sep)[0].lower() == '.metadata' or _vfs_is_replaced(rel):
+		return None
+	return os.path.join(_vfs_vanilla_base(), rel)
+
+def _vfs_to_mod(path):
+	"""Vanilla path -> mod counterpart, or None if path is not inside vanilla."""
+	rel = _vfs_rel(path, _vfs_vanilla_base())
+	if rel is None:
+		return None
+	return os.path.join(_VFS_LOGIC.mod_path, rel)
+
+def _vfs_vanilla_shadowed(vpath):
+	"""True if the game would not load this vanilla file (mod has same rel path, or replace_path)."""
+	rel = _vfs_rel(vpath, _vfs_vanilla_base())
+	if rel is None:
+		return False
+	return _vfs_is_replaced(rel) or os.path.exists(os.path.join(_VFS_LOGIC.mod_path, rel))
+
+def _vfs_log(msg):
+	try:
+		_VFS_LOGIC.log(msg, 'info')
+	except Exception:
+		pass
+
+def vfs_rp(path):
+	"""Resolve a path for reading: missing mod file -> vanilla copy; vanilla file shadowed by mod -> mod copy."""
+	if not _vfs_active() or not isinstance(path, (str, os.PathLike)):
+		return path
+	path = os.fspath(path)
+	v = _vfs_to_vanilla(path)
+	if v is not None:
+		if not os.path.exists(path) and os.path.exists(v):
+			return v
+		return path
+	m = _vfs_to_mod(path)
+	if m is not None and os.path.exists(m):
+		return m
+	return path
+
+def vfs_exists(path):
+	return os.path.exists(vfs_rp(path))
+
+def vfs_key(path):
+	"""Canonical key for a game file regardless of whether it currently lives in mod or vanilla."""
+	if _vfs_active():
+		rel = _vfs_rel(path, _VFS_LOGIC.mod_path)
+		if rel is None:
+			rel = _vfs_rel(path, _vfs_vanilla_base())
+		if rel is not None:
+			return os.path.normcase(rel)
+	return os.path.normcase(os.path.abspath(path))
+
+def _vfs_walk_unshadowed(vdir):
+	for root, dirs, files in os.walk(vdir):
+		yield root, dirs, [f for f in files if not _vfs_vanilla_shadowed(os.path.join(root, f))]
+
+def vfs_walk(top, overlay=True):
+	"""os.walk replacement. In fallback mode a mod dir also yields vanilla files the mod lacks
+	(overlay=False for callers that walk vanilla themselves); a vanilla dir skips shadowed files."""
+	lg = _VFS_LOGIC
+	if not _vfs_active():
+		# Even without fallback, a vanilla dir skips files the mod overrides (as the game does),
+		# so mod-then-vanilla readers don't let stale vanilla copies win.
+		if lg and lg.mod_path and lg.vanilla_path and _vfs_to_mod(os.fspath(top)) is not None:
+			yield from _vfs_walk_unshadowed(os.fspath(top))
+			return
+		yield from os.walk(top)
+		return
+	top = os.fspath(top)
+	v = _vfs_to_vanilla(top)
+	if v is not None:
+		yield from os.walk(top)
+		if overlay and os.path.isdir(v):
+			yield from _vfs_walk_unshadowed(v)
+		return
+	if _vfs_to_mod(top) is not None:
+		yield from _vfs_walk_unshadowed(top)
+		return
+	yield from os.walk(top)
+
+def vfs_listfiles(d):
+	"""Sorted full paths of entries directly in d (mod over vanilla in fallback mode)."""
+	if not _vfs_active():
+		return [os.path.join(d, f) for f in sorted(os.listdir(d))] if os.path.isdir(d) else []
+	m = _vfs_to_mod(d)
+	mod_d = m if m is not None else d
+	van_d = _vfs_to_vanilla(mod_d)
+	out = {}
+	if van_d and os.path.isdir(van_d):
+		for f in os.listdir(van_d):
+			fp = os.path.join(van_d, f)
+			if not _vfs_vanilla_shadowed(fp):
+				out[f] = fp
+	if os.path.isdir(mod_d):
+		for f in os.listdir(mod_d):
+			out[f] = os.path.join(mod_d, f)
+	return [out[k] for k in sorted(out)]
+
+class _VfsCowWriter(io.StringIO):
+	"""Buffers a text write aimed at a vanilla-sourced file. On close, writes the mod copy only if
+	the content differs from vanilla. An exception inside the with-block discards the write."""
+	def __init__(self, target, source, mode, kwargs):
+		super().__init__()
+		self._t, self._s, self._mode, self._kw = target, source, mode, kwargs
+		self._discard = False
+
+	def __exit__(self, exc_type, exc, tb):
+		if exc_type is not None:
+			self._discard = True
+		self.close()
+		return False
+
+	def close(self):
+		if not self.closed and not self._discard:
+			data = self.getvalue()
+			try:
+				with _builtin_open(self._s, 'r', encoding='utf-8-sig', errors='ignore') as fh:
+					orig = fh.read()
+			except Exception:
+				orig = None
+			if orig is None or orig.rstrip() != data.rstrip():
+				os.makedirs(os.path.dirname(self._t), exist_ok=True)
+				with _builtin_open(self._t, self._mode, **self._kw) as fh:
+					fh.write(data)
+				_vfs_log(f"[VANILLA] Copied into mod (modified): {_vfs_rel(self._t, _VFS_LOGIC.mod_path)}")
+		super().close()
+
+def vfs_open(file, mode='r', *args, **kwargs):
+	"""open() replacement. Reads resolve mod-over-vanilla; writes never touch vanilla."""
+	if not _vfs_active() or not isinstance(file, (str, os.PathLike)):
+		return _builtin_open(file, mode, *args, **kwargs)
+	file = os.fspath(file)
+	if not any(c in mode for c in 'wax+'):
+		return _builtin_open(vfs_rp(file), mode, *args, **kwargs)
+	v = _vfs_to_vanilla(file)
+	if v is not None:
+		target, source = file, v
+	else:
+		m = _vfs_to_mod(file)
+		if m is None:
+			return _builtin_open(file, mode, *args, **kwargs)
+		target, source = m, file
+	if os.path.exists(target) or not os.path.exists(source):
+		d = os.path.dirname(target)
+		if d: os.makedirs(d, exist_ok=True)
+		return _builtin_open(target, mode, *args, **kwargs)
+	if 'w' in mode and 'b' not in mode and '+' not in mode and not args:
+		return _VfsCowWriter(target, source, mode, kwargs)
+	os.makedirs(os.path.dirname(target), exist_ok=True)
+	shutil.copy2(source, target)
+	_vfs_log(f"[VANILLA] Copied into mod: {_vfs_rel(target, _VFS_LOGIC.mod_path)}")
+	return _builtin_open(target, mode, *args, **kwargs)
+
 
 class Vic3Logic:
 	# State/government buildings — no ownership_type in game files; always get state ownership.
@@ -65,6 +269,10 @@ class Vic3Logic:
 		self.mod_path = ""
 		self.vanilla_path = ""
 		self.auto_backup_enabled = False
+		self.use_vanilla_fallback = False
+		self.fallback_mods = set()  # normalized mod paths with vanilla fallback on (persisted in config.json)
+		global _VFS_LOGIC
+		_VFS_LOGIC = self
 		self.stop_event = threading.Event()
 		self.state_manager = StateManager(self)
 		self._scan_state_owners_cache = {}
@@ -73,9 +281,30 @@ class Vic3Logic:
 
 	def set_mod_path(self, path):
 		self.mod_path = path
+		self.use_vanilla_fallback = self.fallback_key(path) in self.fallback_mods
+		self.state_manager.load_state_regions()
+
+	@staticmethod
+	def fallback_key(path):
+		return os.path.normcase(os.path.abspath(path)) if path else ""
+
+	def set_vanilla_fallback(self, enabled):
+		"""Per-mod: read missing files from vanilla, copy into the mod only when modified."""
+		key = self.fallback_key(self.mod_path)
+		if not key: return
+		if enabled: self.fallback_mods.add(key)
+		else: self.fallback_mods.discard(key)
+		self.use_vanilla_fallback = bool(enabled)
+		_vfs_replace_cache.clear()
+		self._scan_state_owners_cache.clear()
+		self._country_has_states_cache.clear()
+		self._get_all_owned_states_cache.clear()
 		self.state_manager.load_state_regions()
 
 	def set_vanilla_path(self, path):
+		# Readers join "game/..." onto this, so store the install root even if the game/ folder was picked.
+		if path and not os.path.isdir(os.path.join(path, "game")) and os.path.isdir(os.path.join(path, "common")):
+			path = os.path.dirname(os.path.normpath(path))
 		self.vanilla_path = path
 		self.state_manager.load_state_regions()
 
@@ -112,18 +341,18 @@ class Vic3Logic:
 	def tag_exists(self, tag):
 		"""Checks if a country tag already exists in common/country_definitions."""
 		def_path = os.path.join(self.mod_path, "common/country_definitions")
-		if not os.path.exists(def_path):
+		if not vfs_exists(def_path):
 			return False
 		
-		for root, _, files in os.walk(def_path):
+		for root, _, files in vfs_walk(def_path):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 						content = f.read()
 				
 				if re.search(r"^\s*" + re.escape(tag) + r"\s*=", content, re.MULTILINE):
@@ -141,17 +370,17 @@ class Vic3Logic:
 		if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/country_definitions"))
 
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					# Find tags and colors
@@ -221,18 +450,18 @@ class Vic3Logic:
 		tiers = set()
 		types = set()
 
-		if not os.path.exists(def_path):
+		if not vfs_exists(def_path):
 			return [], [], [], []
 
-		for root, _, files in os.walk(def_path):
+		for root, _, files in vfs_walk(def_path):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 						content = f.read()
 
 				# Cultures
@@ -265,17 +494,17 @@ class Vic3Logic:
 		data = { "cultures": None, "religion": None, "capital": None }
 		
 		def_path = os.path.join(self.mod_path, "common/country_definitions")
-		if not os.path.exists(def_path): return data
+		if not vfs_exists(def_path): return data
 
 		clean_tag = tag.replace("c:", "").strip()
 		
-		for root, _, files in os.walk(def_path):
+		for root, _, files in vfs_walk(def_path):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 				match = re.search(r"(^|\s)" + re.escape(clean_tag) + r"\s*=\s*\{", content, re.MULTILINE | re.IGNORECASE)
 				if match:
@@ -315,20 +544,20 @@ class Vic3Logic:
 	def get_religion_by_culture(self, culture):
 		"""Scans common/cultures to find the default religion for a given culture."""
 		cult_dir = os.path.join(self.mod_path, "common/cultures")
-		if not os.path.exists(cult_dir): return None
+		if not vfs_exists(cult_dir): return None
 
 		# Matches: start of line or whitespace + culture + whitespace + = + whitespace + {
 		pat = re.compile(r"(?:^|\s)" + re.escape(culture) + r"\s*=\s*\{", re.MULTILINE)
 
-		for root, _, files in os.walk(cult_dir):
+		for root, _, files in vfs_walk(cult_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 						content = f.read()
 
 				match = pat.search(content)
@@ -347,18 +576,18 @@ class Vic3Logic:
 	def get_tech_tier_from_history(self, tag):
 		"""Scans history/countries for tech tier."""
 		hist_dir = os.path.join(self.mod_path, "common/history/countries")
-		if not os.path.exists(hist_dir): return None
+		if not vfs_exists(hist_dir): return None
 
 		clean_tag = tag.replace("c:", "").strip()
 
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				# Check for country block c:TAG
 				if re.search(r"c:" + re.escape(clean_tag) + r"\b", content):
@@ -370,20 +599,20 @@ class Vic3Logic:
 	def get_pop_history_data(self, tag):
 		"""Scans history/population for wealth and literacy effects."""
 		pop_dir = os.path.join(self.mod_path, "common/history/population")
-		if not os.path.exists(pop_dir): return None
+		if not vfs_exists(pop_dir): return None
 
 		clean_tag = tag.replace("c:", "").strip()
 		effects = []
 
-		for root, _, files in os.walk(pop_dir):
+		for root, _, files in vfs_walk(pop_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				current_idx = 0
 				while True:
@@ -413,15 +642,15 @@ class Vic3Logic:
 		if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/history/population"))
 
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					path = os.path.join(root, file)
 					try:
-						with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(path, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 					current_idx = 0
 					while True:
@@ -450,14 +679,14 @@ class Vic3Logic:
 		target_content = None
 
 		# 1. Find existing file in mod
-		for root, _, files in os.walk(pop_dir):
+		for root, _, files in vfs_walk(pop_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: c = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: c = f.read()
 
 				if re.search(r"c:" + re.escape(clean_tag) + r"\b", c):
 					target_file = path
@@ -472,8 +701,8 @@ class Vic3Logic:
 			# We will name it "tag.txt" or try to find name
 			target_file = os.path.join(pop_dir, f"{clean_tag}.txt")
 			target_content = f"POPULATION = {{\n\tc:{clean_tag} ?= {{\n\t}}\n}}"
-			if os.path.exists(target_file):
-				with open(target_file, 'r', encoding='utf-8-sig') as f:
+			if vfs_exists(target_file):
+				with vfs_open(target_file, 'r', encoding='utf-8-sig') as f:
 					target_content = f.read()
 
 		# 3. Edit content
@@ -496,14 +725,14 @@ class Vic3Logic:
 
 			target_content = target_content[:s] + new_block + target_content[e:]
 
-			with open(target_file, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 				f.write(target_content)
 			self.log(f"[SAVE] Pop settings saved to {os.path.basename(target_file)}", 'success')
 
 	def get_extended_history_data(self, tag):
 		"""Scans history/countries for extended data (tech, laws, politics, institutions)."""
 		hist_dir = os.path.join(self.mod_path, "common/history/countries")
-		if not os.path.exists(hist_dir): return None
+		if not vfs_exists(hist_dir): return None
 
 		clean_tag = tag.replace("c:", "").strip()
 		data = {
@@ -520,7 +749,7 @@ class Vic3Logic:
 		target_files = []
 		all_files_map = {} # path -> filename
 
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
@@ -540,10 +769,10 @@ class Vic3Logic:
 
 		for path in files_to_scan:
 			try:
-				with open(path, 'r', encoding='utf-8-sig') as f:
+				with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 					content = f.read()
 			except:
-				with open(path, 'r', encoding='utf-8') as f:
+				with vfs_open(path, 'r', encoding='utf-8') as f:
 					content = f.read()
 
 			current_idx = 0
@@ -600,16 +829,16 @@ class Vic3Logic:
 		)
 
 		# Check if file exists
-		if os.path.exists(hist_dir):
-			for root, _, files in os.walk(hist_dir):
+		if vfs_exists(hist_dir):
+			for root, _, files in vfs_walk(hist_dir):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					if tag_pattern.search(content):
@@ -662,7 +891,7 @@ class Vic3Logic:
 		body = "\n\t\t".join(lines)
 		content = f"COUNTRIES = {{\n\tc:{clean_new} ?= {{\n\t\t{body}\n\t}}\n}}"
 
-		with open(filepath, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(filepath, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"[SUCCESS] Created history file: {filename}", 'success')
 
@@ -707,7 +936,7 @@ class Vic3Logic:
 	capital = {capital}
 }}
 """
-		with open(def_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(def_file, 'w', encoding='utf-8-sig') as f:
 			f.write(def_content)
 
 		# Localization
@@ -719,7 +948,7 @@ class Vic3Logic:
  {tag}_ADJ: "{adjective}"
  {tag}_DEF: "{name}"
 """
-		with open(loc_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(loc_file, 'w', encoding='utf-8-sig') as f:
 			f.write(loc_content)
 
 		# History
@@ -766,7 +995,7 @@ class Vic3Logic:
 		hist_content += f"\n\t}}"
 		hist_content += f"\n}}"
 		
-		with open(hist_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(hist_file, 'w', encoding='utf-8-sig') as f:
 			f.write(hist_content)
 
 		# Population History
@@ -799,7 +1028,7 @@ class Vic3Logic:
 		pop_content += f"\t}}"
 		pop_content += f"}}"
 
-		with open(pop_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(pop_file, 'w', encoding='utf-8-sig') as f:
 			f.write(pop_content)
 
 		# Flag
@@ -811,7 +1040,7 @@ class Vic3Logic:
 		flag_content += f"\n\tcolor1 = \"{flag_color_name}\""
 		flag_content += f"}}"
 
-		with open(flag_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(flag_file, 'w', encoding='utf-8-sig') as f:
 			f.write(flag_content)
 
 	def _get_location_data(self, tag, target_state):
@@ -886,7 +1115,7 @@ class Vic3Logic:
 		content += f"\n\t}}"
 		content +=  "\n}"
 
-		with open(mil_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(mil_file, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"   [WRITE] {mil_file}", 'success')
 
@@ -935,7 +1164,7 @@ class Vic3Logic:
 		content += f"\n\t}}"
 		content +=  "\n}"
 		
-		with open(mil_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(mil_file, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"   [WRITE] {mil_file}", 'success')
 
@@ -948,14 +1177,14 @@ class Vic3Logic:
 		if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/strategic_regions"))
 
 		for path in paths:
-			if not os.path.exists(path): continue
+			if not vfs_exists(path): continue
 
-			for root, _, files in os.walk(path):
+			for root, _, files in vfs_walk(path, overlay=False):
 				if self.stop_event.is_set(): return None
 				for file in files:
 					if not file.endswith(".txt"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 
 						# Strip comments to prevent false positives
@@ -1007,16 +1236,16 @@ class Vic3Logic:
 		if self.mod_path: paths.append(os.path.join(self.mod_path, "common/character_templates"))
 		if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/character_templates"))
 		for path in paths:
-			if not os.path.exists(path): continue
-			for root, _, files in os.walk(path):
+			if not vfs_exists(path): continue
+			for root, _, files in vfs_walk(path, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as fh:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as fh:
 							fc = fh.read()
 					except:
 						try:
-							with open(os.path.join(root, file), 'r', encoding='utf-8') as fh:
+							with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as fh:
 								fc = fh.read()
 						except:
 							continue
@@ -1037,19 +1266,19 @@ class Vic3Logic:
 		if not template_name or not new_hq_region:
 			return
 		tmpl_dir = os.path.join(self.mod_path, "common", "character_templates")
-		if not os.path.exists(tmpl_dir):
+		if not vfs_exists(tmpl_dir):
 			return
 		clean_hq = new_hq_region.replace("sr:", "").strip()
-		for root, _, files in os.walk(tmpl_dir):
+		for root, _, files in vfs_walk(tmpl_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, "r", encoding="utf-8-sig") as fh: fc = fh.read()
+					with vfs_open(path, "r", encoding="utf-8-sig") as fh: fc = fh.read()
 				except:
 					try:
-						with open(path, "r", encoding="utf-8") as fh: fc = fh.read()
+						with vfs_open(path, "r", encoding="utf-8") as fh: fc = fh.read()
 					except:
 						continue
 				tm = re.search(re.escape(template_name) + r"\s*=\s*\{", fc)
@@ -1067,7 +1296,7 @@ class Vic3Logic:
 					block, count=1, flags=re.IGNORECASE
 				)
 				new_fc = fc[:s_idx] + new_block + fc[e_idx:]
-				with open(path, "w", encoding="utf-8") as fh:
+				with vfs_open(path, "w", encoding="utf-8") as fh:
 					fh.write(new_fc)
 				self.log(f"      [GEN] Updated hq in template {template_name} -> sr:{clean_hq}")
 				return
@@ -1081,16 +1310,16 @@ class Vic3Logic:
 		if self.vanilla_path: paths.append(os.path.join(self.vanilla_path, "game/common/strategic_regions"))
 
 		for path in paths:
-			if not os.path.exists(path): continue
+			if not vfs_exists(path): continue
 
-			for root, _, files in os.walk(path):
+			for root, _, files in vfs_walk(path, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 					# Clean comments
 					content_clean = re.sub(r"#.*", "", content)
@@ -1160,26 +1389,26 @@ class Vic3Logic:
 		scope_regex = re.compile(r"save_(?:temporary_)?scope_as\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)	# todo: carlists
 
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p):
 				if self.stop_event.is_set(): return valid_scopes
 				for file in files:
 					if not file.endswith(".txt"): continue
 					path = os.path.join(root, file)
 					try:
-						with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(path, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 					valid_scopes.update(scope_regex.findall(content))
 		return valid_scopes
 
 	def clean_trade_history(self, state_list):
 		self.log("[TRADE] Scanning historical trade for cleanup...")
 		trade_file = os.path.join(self.mod_path, "common/history/trade/00_historical_trade.txt")
-		if not os.path.exists(trade_file): return
+		if not vfs_exists(trade_file): return
 
 		try:
-			with open(trade_file, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(trade_file, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except: return
 
 		# Iterate states to remove
@@ -1213,7 +1442,7 @@ class Vic3Logic:
 					break
 
 		if changed:
-			with open(trade_file, 'w', encoding='utf-8-sig') as f: f.write(content)
+			with vfs_open(trade_file, 'w', encoding='utf-8-sig') as f: f.write(content)
 			self.log("[TRADE] Cleaned up trade routes.")
 
 	def ensure_railway_tech(self, tag):	# todo
@@ -1224,14 +1453,14 @@ class Vic3Logic:
 		target_content = None
 
 		# Locate file
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				if re.search(r"c:" + re.escape(clean_tag) + r"\b", content):
 					target_file = path
@@ -1254,7 +1483,7 @@ class Vic3Logic:
 						new_block = block[:lb] + "\n\t\tadd_technology_researched = railways\n\t}"
 						target_content = target_content[:s] + new_block + target_content[e:]
 
-						with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(target_content)
+						with vfs_open(target_file, 'w', encoding='utf-8-sig') as f: f.write(target_content)
 						self.log(f"[TECH] Added railways to {clean_tag}")
 
 	def prune_orphaned_commanders(self, valid_scopes):	# todo
@@ -1268,9 +1497,9 @@ class Vic3Logic:
 		self.log("[FIX] Checking for orphaned formation links...")
 
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p):
 				if self.stop_event.is_set():
 					return
 				for file in files:
@@ -1278,10 +1507,10 @@ class Vic3Logic:
 						continue
 					path = os.path.join(root, file)
 					try:
-						with open(path, 'r', encoding='utf-8-sig') as f:
+						with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(path, 'r', encoding='utf-8') as f:
+						with vfs_open(path, 'r', encoding='utf-8') as f:
 							content = f.read()
 					new_lines = []
 					file_changed = False
@@ -1301,14 +1530,14 @@ class Vic3Logic:
 						else:
 							new_lines.append(line)
 					if file_changed:
-						with open(path, 'w', encoding='utf-8-sig') as f:
+						with vfs_open(path, 'w', encoding='utf-8-sig') as f:
 							f.write("\n".join(new_lines))
 		if orphans_removed > 0:
 			self.log(f"[SUCCESS] Removed {orphans_removed} orphaned links.", 'success')
 
 	def get_all_owned_states(self, tag):
 		states_dir = os.path.join(self.mod_path, "common/history/states")
-		if not os.path.exists(states_dir):
+		if not vfs_exists(states_dir):
 			return []
 		clean_tag = tag.replace("c:", "").strip()
 		cache_key = clean_tag.upper()
@@ -1320,7 +1549,7 @@ class Vic3Logic:
 		state_pat = re.compile(r"(?:^|\s)s:(STATE_[A-Za-z0-9_]+)\s*(?:\?=|:|=)\s*\{", re.MULTILINE)
 		cs_pat = re.compile(r"create_state\s*=\s*\{")
 
-		for root, _, files in os.walk(states_dir):
+		for root, _, files in vfs_walk(states_dir):
 			if self.stop_event.is_set():
 				return []
 			for file in files:
@@ -1328,10 +1557,10 @@ class Vic3Logic:
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f:
+					with vfs_open(path, 'r', encoding='utf-8') as f:
 						content = f.read()
 
 				# Skip files that don't mention the tag at all
@@ -1362,12 +1591,12 @@ class Vic3Logic:
 		if cache_key in self._get_all_owned_states_cache:
 			return bool(self._get_all_owned_states_cache[cache_key])
 		states_dir = os.path.join(self.mod_path, "common/history/states")
-		if not os.path.exists(states_dir):
+		if not vfs_exists(states_dir):
 			return False
 		tag_pat = re.compile(r"country\s*=\s*c:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
 		state_pat = re.compile(r"(?:^|\s)s:(STATE_[A-Za-z0-9_]+)\s*(?:\?=|:|=)\s*\{", re.MULTILINE)
 		cs_pat = re.compile(r"create_state\s*=\s*\{")
-		for root, _, files in os.walk(states_dir):
+		for root, _, files in vfs_walk(states_dir):
 			if self.stop_event.is_set():
 				return False
 			for file in files:
@@ -1375,9 +1604,9 @@ class Vic3Logic:
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: file_content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: file_content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: file_content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: file_content = f.read()
 				if not tag_pat.search(file_content):
 					continue
 				for sm in state_pat.finditer(file_content):
@@ -1997,16 +2226,16 @@ class Vic3Logic:
 
 		for folder in folders:
 			target_dir = os.path.join(self.mod_path, "common/history", folder)
-			if not os.path.exists(target_dir): continue
-			for root, _, files in os.walk(target_dir):
+			if not vfs_exists(target_dir): continue
+			for root, _, files in vfs_walk(target_dir):
 				if self.stop_event.is_set(): return results, railway_recipients
 				for file in files:
 					if not file.endswith(".txt"): continue
 					filepath = os.path.join(root, file)
 					try:
-						with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 					file_changed = False
 					for state in state_list:
 						s_start, s_end = self.get_block_range_safe(content, f"s:{state}")
@@ -2047,7 +2276,7 @@ class Vic3Logic:
 
 					if file_changed:
 						self.log(f"   [UPDATED] {folder}/{file}")
-						with open(filepath, 'w', encoding='utf-8-sig') as f:
+						with vfs_open(filepath, 'w', encoding='utf-8-sig') as f:
 							f.write(content)
 		return results, railway_recipients
 
@@ -2062,9 +2291,9 @@ class Vic3Logic:
 
 	def process_military_extraction_multi_pass(self, filepath, old_tag, new_tag, region, state_list, force_move=False, dest_hq_region=None, dest_home_state=None):
 		try:
-			with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except:
-			with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+			with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 
 		# Prepare normalized set for fast lookup
 		target_states_norm = set(self.normalize_state_key(s) for s in state_list)
@@ -2579,15 +2808,15 @@ class Vic3Logic:
 					# Before creating, check all other mil files for existing matching formation
 					mil_dir_inj = os.path.dirname(filepath)
 					injected_other = False
-					for other_fn in sorted(os.listdir(mil_dir_inj)):
+					for other_path in vfs_listfiles(mil_dir_inj):
+						other_fn = os.path.basename(other_path)
 						if not other_fn.endswith(".txt"): continue
-						other_path = os.path.join(mil_dir_inj, other_fn)
-						if os.path.abspath(other_path) == os.path.abspath(filepath): continue
+						if vfs_key(other_path) == vfs_key(filepath): continue
 						try:
-							with open(other_path, 'r', encoding='utf-8-sig') as fh2: oc = fh2.read()
+							with vfs_open(other_path, 'r', encoding='utf-8-sig') as fh2: oc = fh2.read()
 						except:
 							try:
-								with open(other_path, 'r', encoding='utf-8') as fh2: oc = fh2.read()
+								with vfs_open(other_path, 'r', encoding='utf-8') as fh2: oc = fh2.read()
 							except: continue
 						# Find latest c:{new_tag} block in this other file
 						oc_tag_pos = -1; oc_curr = 0
@@ -2618,7 +2847,7 @@ class Vic3Logic:
 						if found_oc_insert is not None:
 							units_text = "\n\t\t\t# Transferred Units\n" + indent_units(units, 3)
 							new_oc = oc[:found_oc_insert] + units_text + "\n\t\t" + oc[found_oc_insert:]
-							with open(other_path, 'w', encoding='utf-8-sig') as fh2: fh2.write(new_oc)
+							with vfs_open(other_path, 'w', encoding='utf-8-sig') as fh2: fh2.write(new_oc)
 							first_fm_scope = first_fm_scope or found_oc_scope
 							first_fm_hq = first_fm_hq or sr_key
 							self.log(f"      [MERGE] Merging {len(units)} unit(s) into existing {f_type} in {other_fn} for c:{new_tag}")
@@ -2700,7 +2929,7 @@ class Vic3Logic:
 				stripped = new_file_content
 			new_file_content = f"MILITARY_FORMATIONS = {{\n{stripped}\n}}"
 
-		with open(filepath, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(filepath, 'w', encoding='utf-8-sig') as f:
 			f.write(new_file_content)
 		return True
 
@@ -2728,14 +2957,14 @@ class Vic3Logic:
 
 		found_content = None
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig', errors='ignore') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig', errors='ignore') as f:
 							content = f.read()
 
 						# Look for STATE_NAME = {
@@ -2817,9 +3046,9 @@ class Vic3Logic:
 		target_content = None
 
 		mod_states_dir = os.path.join(self.mod_path, "map_data", "state_regions")
-		if not os.path.exists(mod_states_dir):
+		if not vfs_exists(mod_states_dir):
 			mod_states_dir = os.path.join(self.mod_path, "map", "data", "state_regions")
-			if not os.path.exists(mod_states_dir):
+			if not vfs_exists(mod_states_dir):
 				# Default to map_data/state_regions if neither exists
 				mod_states_dir = os.path.join(self.mod_path, "map_data", "state_regions")
 				os.makedirs(mod_states_dir, exist_ok=True)
@@ -2828,12 +3057,12 @@ class Vic3Logic:
 			state_name = f"STATE_{state_name.upper()}"
 
 		# Check existing mod file
-		for root, _, files in os.walk(mod_states_dir):
+		for root, _, files in vfs_walk(mod_states_dir, overlay=False):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
 					if re.search(r"(^|\s)" + re.escape(state_name) + r"\s*=\s*\{", c):
 						target_file = path
 						target_content = c
@@ -2849,21 +3078,21 @@ class Vic3Logic:
 				os.path.join(self.vanilla_path, "game", "map", "data", "state_regions")
 			]
 			for v_dir in v_dirs:
-				if not os.path.exists(v_dir):
+				if not vfs_exists(v_dir):
 					continue
-				for root, _, files in os.walk(v_dir):
+				for root, _, files in vfs_walk(v_dir, overlay=False):
 					for file in files:
 						if not file.endswith(".txt"):
 							continue
 						path = os.path.join(root, file)
 						try:
-							with open(path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+							with vfs_open(path, 'r', encoding='utf-8-sig', errors='ignore') as f:
 								c = f.read()
 							if re.search(r"(^|\s)" + re.escape(state_name) + r"\s*=\s*\{", c):
 								# Found it. Copy to mod.
 								target_file = os.path.join(mod_states_dir, file)
 								target_content = c
-								with open(target_file, 'w', encoding='utf-8-sig') as f_out:
+								with vfs_open(target_file, 'w', encoding='utf-8-sig') as f_out:
 									f_out.write(c)
 								self.log(f"[RES] Copied {file} from vanilla to mod.", 'info')
 								break
@@ -2953,7 +3182,7 @@ class Vic3Logic:
 
 		# Write back
 		final_content = target_content[:s] + block + target_content[e:]
-		with open(target_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 			f.write(final_content)
 		self.log(f"[RES] Updated resources for {state_name}", 'success')
 
@@ -2961,19 +3190,19 @@ class Vic3Logic:
 		"""Scans all military formation files once and returns {filepath: frozenset_of_tags}."""
 		mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
 		index = {}
-		if not os.path.exists(mil_dir):
+		if not vfs_exists(mil_dir):
 			return index
 		tag_pat = re.compile(r"\bc:([A-Za-z0-9_]+)\b")
-		for root, _, files in os.walk(mil_dir):
+		for root, _, files in vfs_walk(mil_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: c = f.read()
-				index[path] = frozenset(m.upper() for m in tag_pat.findall(c))
+					with vfs_open(path, 'r', encoding='utf-8') as f: c = f.read()
+				index[vfs_key(path)] = frozenset(m.upper() for m in tag_pat.findall(c))
 		return index
 
 	def clean_military_smart(self, old_tag, new_tag, region, state_list, force_move=False, dest_hq_region=None, dest_home_state=None, file_tag_index=None):
@@ -2989,8 +3218,8 @@ class Vic3Logic:
 
 		mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
 		files_processed = 0
-		if os.path.exists(mil_dir):
-			for root, _, files in os.walk(mil_dir):
+		if vfs_exists(mil_dir):
+			for root, _, files in vfs_walk(mil_dir):
 				if self.stop_event.is_set():
 					return
 				for file in files:
@@ -2999,7 +3228,7 @@ class Vic3Logic:
 					filepath = os.path.join(root, file)
 					if old_tag and file_tag_index is not None:
 						clean_old = old_tag.replace('c:', '').strip().upper()
-						if clean_old not in file_tag_index.get(filepath, frozenset()):
+						if clean_old not in file_tag_index.get(vfs_key(filepath), frozenset()):
 							continue
 					files_processed += 1
 					self.process_military_extraction_multi_pass(filepath, old_tag, new_tag, region, target_states, force_move=force_move, dest_hq_region=dest_hq_region, dest_home_state=dest_home_state)
@@ -3014,18 +3243,18 @@ class Vic3Logic:
 		new_clean = self.normalize_state_key(new_state_key).replace("s:", "")
 
 		mil_dir = os.path.join(self.mod_path, "common/history/military_formations")
-		if not os.path.exists(mil_dir): return
+		if not vfs_exists(mil_dir): return
 
 		touched_formations = set()
 
-		for root, _, files in os.walk(mil_dir):
+		for root, _, files in vfs_walk(mil_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				files_changed = False
 				new_content = content
@@ -3080,7 +3309,7 @@ class Vic3Logic:
 						cursor += 1
 
 				if files_changed:
-					with open(path, 'w', encoding='utf-8-sig') as f: f.write(new_content)
+					with vfs_open(path, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 					self.log(f"[MIL] Moved units from {old_clean} to {new_clean} in {file}")
 
 		if touched_formations:
@@ -3088,16 +3317,16 @@ class Vic3Logic:
 
 	def disconnect_commanders_from_formations(self, formation_ids):
 		char_dir = os.path.join(self.mod_path, "common/history/characters")
-		if not os.path.exists(char_dir): return
+		if not vfs_exists(char_dir): return
 
-		for root, _, files in os.walk(char_dir):
+		for root, _, files in vfs_walk(char_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				new_lines = []
 				changed = False
@@ -3114,7 +3343,7 @@ class Vic3Logic:
 						new_lines.append(line)
 
 				if changed:
-					with open(path, 'w', encoding='utf-8-sig') as f: f.write("\n".join(new_lines))
+					with vfs_open(path, 'w', encoding='utf-8-sig') as f: f.write("\n".join(new_lines))
 					self.log(f"[CHAR] Disconnected commanders in {file}")
 
 	def perform_transfer_sequence(self, states_clean, new_tag, known_old_owners=None, prune_refs=True):
@@ -3220,21 +3449,21 @@ class Vic3Logic:
 	# --- COUNTRY MODIFICATION LOGIC ---
 	def load_country_localization(self, tag):
 		loc_dir = os.path.join(self.mod_path, "localization", "english")
-		if not os.path.exists(loc_dir): return "", ""
+		if not vfs_exists(loc_dir): return "", ""
 
 		name = ""
 		adj = ""
 
 		def search_dir(directory):
 			n, a = "", ""
-			if not os.path.exists(directory): return "", ""
-			for root, _, files in os.walk(directory):
+			if not vfs_exists(directory): return "", ""
+			for root, _, files in vfs_walk(directory):
 				for file in files:
 					if not file.endswith(".yml"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 					m_name = re.search(r'^\s*' + re.escape(tag) + r':\d?\s*"(.*)"', content, re.MULTILINE | re.IGNORECASE)
 					if m_name: n = m_name.group(1)
@@ -3255,14 +3484,14 @@ class Vic3Logic:
 
 		# Check if a replace file for this tag already exists to append/modify
 		target_file = None
-		for root, _, files in os.walk(rep_dir):
+		for root, _, files in vfs_walk(rep_dir):
 			for file in files:
 				if not file.endswith(".yml"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				if re.search(r"^\s*" + re.escape(tag) + r":", content, re.MULTILINE):
 					target_file = path
@@ -3271,15 +3500,15 @@ class Vic3Logic:
 
 		if not target_file:
 			target_file = os.path.join(rep_dir, f"{tag.lower()}_l_english.yml")
-			if not os.path.exists(target_file):
-				with open(target_file, 'w', encoding='utf-8-sig') as f:
+			if not vfs_exists(target_file):
+				with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 					f.write("l_english:\n")
 
 		try:
-			with open(target_file, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(target_file, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(target_file, 'r', encoding='utf-8') as f:
+			with vfs_open(target_file, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		# Update Name
@@ -3300,21 +3529,21 @@ class Vic3Logic:
 		else:
 			content += f' {tag}_DEF: "{name}"\n'
 
-		with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with vfs_open(target_file, 'w', encoding='utf-8-sig') as f: f.write(content)
 		self.log(f"[SAVE] Localization saved to {target_file}", 'success')
 
 	def load_country_definition_data(self, tag):
 		def_path = os.path.join(self.mod_path, "common", "country_definitions")
-		if not os.path.exists(def_path): return None, None, None
+		if not vfs_exists(def_path): return None, None, None
 		clean_tag = tag.strip()
-		for root, _, files in os.walk(def_path):
+		for root, _, files in vfs_walk(def_path):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 				match = re.search(r"(^|\s)" + re.escape(clean_tag) + r"\s*=\s*\{", content, re.MULTILINE)
 				if match:
 					start = match.end() - 1
@@ -3347,13 +3576,13 @@ class Vic3Logic:
 
 	def save_country_definition(self, tag, rgb, capital, filepath, cultures=None, religion=None):
 		self.perform_auto_backup()
-		if not filepath or not os.path.exists(filepath):
+		if not filepath or not vfs_exists(filepath):
 			self.log("[ERROR] Definition file not found to update.", 'error')
 			return
 		try:
-			with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except:
-			with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+			with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 		match = re.search(r"(^|\s)" + re.escape(tag) + r"\s*=\s*\{", content, re.MULTILINE)
 		if match:
 			start = match.end() - 1
@@ -3389,20 +3618,20 @@ class Vic3Logic:
 					new_block = re.sub(r"is_named_from_capital\s*=\s*(?!yes\b)[A-Za-z0-9_]+", "is_named_from_capital = yes", new_block)
 
 				content = content[:start] + new_block + content[end:]
-				with open(filepath, 'w', encoding='utf-8-sig') as f: f.write(content)
+				with vfs_open(filepath, 'w', encoding='utf-8-sig') as f: f.write(content)
 				self.log(f"[SAVE] Updated definitions in {filepath}", 'success')
 
 	def load_character_template(self, template_name):
 		tmpl_dir = os.path.join(self.mod_path, "common", "character_templates")
-		if not os.path.exists(tmpl_dir): return None
-		for root, _, files in os.walk(tmpl_dir):
+		if not vfs_exists(tmpl_dir): return None
+		for root, _, files in vfs_walk(tmpl_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				# Search for template = { ... }
 				# Using regex to find start, then block helper
@@ -3436,15 +3665,15 @@ class Vic3Logic:
 
 		# 1. Load Laws/Gov from history/countries
 		hist_dir = os.path.join(self.mod_path, "common", "history", "countries")
-		if os.path.exists(hist_dir):
-			for root, _, files in os.walk(hist_dir):
+		if vfs_exists(hist_dir):
+			for root, _, files in vfs_walk(hist_dir):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					path = os.path.join(root, file)
 					try:
-						with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(path, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 					idx = 0
 					while True:
@@ -3478,15 +3707,15 @@ class Vic3Logic:
 
 		# 2. Check history/characters for templates (Overwrites inline if found)
 		char_hist_dir = os.path.join(self.mod_path, "common", "history", "characters")
-		if os.path.exists(char_hist_dir):
-			for root, _, files in os.walk(char_hist_dir):
+		if vfs_exists(char_hist_dir):
+			for root, _, files in vfs_walk(char_hist_dir):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					path = os.path.join(root, file)
 					try:
-						with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(path, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 					idx = 0
 					while True:
@@ -3523,18 +3752,18 @@ class Vic3Logic:
 		# (This handles cases where history files are hard to parse or missing, but templates exist)
 		if not info["ruler"]["first"]:
 			tmpl_dir = os.path.join(self.mod_path, "common", "character_templates")
-			if os.path.exists(tmpl_dir):
+			if vfs_exists(tmpl_dir):
 				target_fname = f"country_{clean_tag}"
-				for root, _, files in os.walk(tmpl_dir):
+				for root, _, files in vfs_walk(tmpl_dir):
 					for file in files:
 						if not file.endswith(".txt"): continue
 						# loose match for filename
 						if target_fname.lower() in file.lower() or clean_tag.lower() in file.lower():
 							path = os.path.join(root, file)
 							try:
-								with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+								with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 							except:
-								with open(path, 'r', encoding='utf-8') as f: content = f.read()
+								with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 							# Scan all top-level blocks
 							cursor = 0
@@ -3581,14 +3810,14 @@ class Vic3Logic:
 		clean_tag = tag.replace("c:", "").strip()
 		target_path = None
 		target_content = None
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 				if re.search(r"c:" + re.escape(clean_tag) + r"\b", content):
 					target_path = path; target_content = content; break
 
@@ -3660,7 +3889,7 @@ class Vic3Logic:
 			new_block = new_block[:new_block.rfind('}')].rstrip() + new_ruler_block + "\n\t}"
 
 		target_content = target_content[:s] + new_block + target_content[e:]
-		with open(target_path, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 			f.write(target_content)
 		self.log(f"[SAVE] History updated in {target_path}", 'success')
 
@@ -3671,17 +3900,17 @@ class Vic3Logic:
 	def find_and_remove_subject_status(self, tag_to_free):
 		"""Scans all diplomacy files and removes any subject pact where tag_to_free is the target."""
 		dip_dir = os.path.join(self.mod_path, "common", "history", "diplomacy")
-		if not os.path.exists(dip_dir): return
+		if not vfs_exists(dip_dir): return
 		clean_target = tag_to_free.replace("c:", "").strip()
 
-		for root, _, files in os.walk(dip_dir):
+		for root, _, files in vfs_walk(dip_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				original_content = content
 				file_changed = False
@@ -3760,22 +3989,22 @@ class Vic3Logic:
 						idx = abs_start + 1 # Should not happen if regex matched
 
 				if file_changed:
-					with open(path, 'w', encoding='utf-8-sig') as f: f.write(content)
+					with vfs_open(path, 'w', encoding='utf-8-sig') as f: f.write(content)
 
 	def load_diplomacy_data(self, tag):
 		dip_dir = os.path.join(self.mod_path, "common", "history", "diplomacy")
 		info = { "subjects": [], "rivals": [], "embargos": [], "truces": [], "relations": [] }
-		if not os.path.exists(dip_dir): return info
+		if not vfs_exists(dip_dir): return info
 		clean_tag = tag.replace("c:", "").strip()
 
-		for root, _, files in os.walk(dip_dir):
+		for root, _, files in vfs_walk(dip_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				idx = 0
 				while True:
@@ -3843,13 +4072,13 @@ class Vic3Logic:
 		elif category == "truce": filename = "00_truces.txt"
 
 		filepath = os.path.join(dip_dir, filename)
-		if not os.path.exists(filepath):
-			with open(filepath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
+		if not vfs_exists(filepath):
+			with vfs_open(filepath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
 
 		try:
-			with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except:
-			with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+			with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 
 		# Build entry
 		entry = ""
@@ -3875,7 +4104,7 @@ class Vic3Logic:
 			else:
 				content += f"\nDIPLOMACY = {{\n\tc:{clean_tag} ?= {{\n{entry}\n\t}}\n}}"
 
-		with open(filepath, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with vfs_open(filepath, 'w', encoding='utf-8-sig') as f: f.write(content)
 		self.log(f"[DIP] Added {pact_type} with {clean_target} in {filename}", 'success')
 
 	def remove_diplomatic_pact(self, tag, target, pact_type):
@@ -3888,12 +4117,12 @@ class Vic3Logic:
 
 		for fname in files_to_check:
 			fpath = os.path.join(dip_dir, fname)
-			if not os.path.exists(fpath): continue
+			if not vfs_exists(fpath): continue
 
 			try:
-				with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+				with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 			except:
-				with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+				with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 			s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
 			if not s: continue
@@ -3945,7 +4174,7 @@ class Vic3Logic:
 			if change_made:
 				new_block = block[:header_len] + "".join(new_inner_parts) + "}"
 				content = content[:s] + new_block + content[e:]
-				with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
+				with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
 				self.log(f"[DIP] Removed {pact_type} with {clean_target} from {fname}", 'success')
 
 	def set_relations(self, tag, target, value):
@@ -3953,13 +4182,13 @@ class Vic3Logic:
 		dip_dir = os.path.join(self.mod_path, "common", "history", "diplomacy")
 		os.makedirs(dip_dir, exist_ok=True)
 		fpath = os.path.join(dip_dir, "00_relations.txt")
-		if not os.path.exists(fpath):
-			with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
+		if not vfs_exists(fpath):
+			with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write("DIPLOMACY = {\n}")
 
 		try:
-			with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except:
-			with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+			with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 		clean_tag = tag.replace("c:", "").strip()
 		clean_target = target.replace("c:", "").strip()
@@ -3986,13 +4215,13 @@ class Vic3Logic:
 			else:
 				content += f"\nDIPLOMACY = {{\n\tc:{clean_tag} ?= {{\n{entry}\n\t}}\n}}"
 
-		with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
 		self.log(f"[DIP] Relations set to {value} with {clean_target}", 'success')
 
 	# --- MOD MANAGER LOGIC ---
 	def copy_tree_content(self, src, dst):
 		"""Recursively copies content of src folder to dst folder."""
-		if not os.path.exists(src):
+		if not vfs_exists(src):
 			self.log(f"[WARN] Source path does not exist: {src}", 'warn')
 			return
 		os.makedirs(dst, exist_ok=True)
@@ -4000,7 +4229,7 @@ class Vic3Logic:
 			s = os.path.join(src, item)
 			d = os.path.join(dst, item)
 			if os.path.isdir(s):
-				if not os.path.exists(d): os.makedirs(d)
+				if not vfs_exists(d): os.makedirs(d)
 				self.copy_tree_content(s, d)
 			else:
 				shutil.copy2(s, d)
@@ -4011,7 +4240,7 @@ class Vic3Logic:
 			return False
 
 		mod_root = os.path.join(location, name)
-		if os.path.exists(mod_root):
+		if vfs_exists(mod_root):
 			self.log(f"[ERROR] Directory already exists: {mod_root}", 'error')
 			return False
 
@@ -4033,7 +4262,7 @@ class Vic3Logic:
 				}
 			}
 
-			with open(os.path.join(meta_dir, "metadata.json"), 'w') as f:
+			with vfs_open(os.path.join(meta_dir, "metadata.json"), 'w') as f:
 				json.dump(metadata, f, indent=4)
 
 			self.log(f"[SUCCESS] Created new mod structure at {mod_root}", 'success')
@@ -4048,13 +4277,13 @@ class Vic3Logic:
 
 	def copy_vanilla_files(self, vanilla_path, mod_path):
 		"""Copies the list of necessary default files and folders from vanilla."""
-		if not vanilla_path or not os.path.exists(vanilla_path):
+		if not vanilla_path or not vfs_exists(vanilla_path):
 			self.log("[ERROR] Vanilla path invalid or not set.", 'error')
 			return
 
 		# Handle 'game' subdirectory if user selected root install folder
 		game_dir = os.path.join(vanilla_path, "game")
-		if os.path.exists(game_dir):
+		if vfs_exists(game_dir):
 			base_src = game_dir
 		else:
 			base_src = vanilla_path
@@ -4100,13 +4329,13 @@ class Vic3Logic:
 			src = os.path.join(base_src, rel_path)
 			dst = os.path.join(mod_path, rel_path)
 
-			if not os.path.exists(src):
+			if not vfs_exists(src):
 				# Try lower case for English path if failed
 				if "English" in rel_path or "english" in rel_path:
 					alt_path = rel_path.replace("English", "english")
 					src = os.path.join(base_src, alt_path)
 
-			if not os.path.exists(src):
+			if not vfs_exists(src):
 				self.log(f"[WARN] Skipped missing vanilla path: {rel_path}", 'warn')
 				continue
 
@@ -4129,7 +4358,7 @@ class Vic3Logic:
 
 	def backup_mod(self, mod_path):
 		"""Creates a numbered backup of the current mod."""
-		if not mod_path or not os.path.exists(mod_path):
+		if not mod_path or not vfs_exists(mod_path):
 			self.log("[ERROR] Current mod path invalid.", 'error')
 			return
 
@@ -4141,7 +4370,7 @@ class Vic3Logic:
 		while True:
 			backup_name = f"{mod_dirname}_backup_{idx}"
 			backup_path = os.path.join(parent_dir, backup_name)
-			if not os.path.exists(backup_path):
+			if not vfs_exists(backup_path):
 				break
 			idx += 1
 
@@ -4156,7 +4385,7 @@ class Vic3Logic:
 
 	def perform_auto_backup(self):
 		"""Creates or overwrites the auto-backup folder if enabled."""
-		if not self.auto_backup_enabled or not self.mod_path or not os.path.exists(self.mod_path):
+		if not self.auto_backup_enabled or not self.mod_path or not vfs_exists(self.mod_path):
 			return
 
 		parent_dir = os.path.dirname(self.mod_path)
@@ -4167,7 +4396,7 @@ class Vic3Logic:
 		try:
 			# We want to replace contents. efficient way: rmtree then copytree
 			# Or copytree with dirs_exist_ok=True (Python 3.8+)
-			if os.path.exists(backup_path):
+			if vfs_exists(backup_path):
 				shutil.rmtree(backup_path)
 
 			shutil.copytree(self.mod_path, backup_path)
@@ -4188,16 +4417,16 @@ class Vic3Logic:
 		culture_data = {}
 
 		cult_dir = os.path.join(self.mod_path, "common", "cultures")
-		if not os.path.exists(cult_dir): return {}, [], [], [], [], []
+		if not vfs_exists(cult_dir): return {}, [], [], [], [], []
 
-		for root, _, files in os.walk(cult_dir):
+		for root, _, files in vfs_walk(cult_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				fpath = os.path.join(root, file)
 				try:
-					with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 				cursor = 0
 				while True:
@@ -4254,15 +4483,15 @@ class Vic3Logic:
 		heritages = set()
 
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					cursor = 0
@@ -4324,9 +4553,9 @@ class Vic3Logic:
 			f"\n\t}}"
 		)
 		# Append or Create
-		mode = 'a' if os.path.exists(fpath) else 'w'
+		mode = 'a' if vfs_exists(fpath) else 'w'
 		try:
-			with open(fpath, mode, encoding='utf-8-sig') as f:
+			with vfs_open(fpath, mode, encoding='utf-8-sig') as f:
 				f.write(content_block)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save culture: {e}", 'error')
@@ -4337,11 +4566,11 @@ class Vic3Logic:
 		os.makedirs(loc_dir, exist_ok=True)
 		lpath = os.path.join(loc_dir, f"{mod_name}_cultures_l_english.yml")
 
-		if not os.path.exists(lpath):
-			with open(lpath, 'w', encoding='utf-8-sig') as f:
+		if not vfs_exists(lpath):
+			with vfs_open(lpath, 'w', encoding='utf-8-sig') as f:
 				f.write("l_english:\n")
 
-		with open(lpath, 'a', encoding='utf-8-sig') as f:
+		with vfs_open(lpath, 'a', encoding='utf-8-sig') as f:
 			f.write(f' {key}:0 "{name}"\n')
 
 		self.log(f"[SUCCESS] Saved culture {key}", 'success')
@@ -4364,9 +4593,9 @@ class Vic3Logic:
 			f"\n\tcolor = {{ {r:.2f} {g:.2f} {b:.2f} }}"
 			f"\n}}"
 		)
-		mode = 'a' if os.path.exists(fpath) else 'w'
+		mode = 'a' if vfs_exists(fpath) else 'w'
 		try:
-			with open(fpath, mode, encoding='utf-8-sig') as f:
+			with vfs_open(fpath, mode, encoding='utf-8-sig') as f:
 				f.write(content_block)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save religion: {e}", 'error')
@@ -4377,11 +4606,11 @@ class Vic3Logic:
 		os.makedirs(loc_dir, exist_ok=True)
 		lpath = os.path.join(loc_dir, f"{mod_name}_religions_l_english.yml")
 
-		if not os.path.exists(lpath):
-			with open(lpath, 'w', encoding='utf-8-sig') as f:
+		if not vfs_exists(lpath):
+			with vfs_open(lpath, 'w', encoding='utf-8-sig') as f:
 				f.write("l_english:\n")
 
-		with open(lpath, 'a', encoding='utf-8-sig') as f:
+		with vfs_open(lpath, 'a', encoding='utf-8-sig') as f:
 			f.write(f' {key}:0 "{name}"\n')
 
 		self.log(f"[SUCCESS] Saved religion {key}", 'success')
@@ -4391,16 +4620,16 @@ class Vic3Logic:
 		"""Scans history/global for existing power blocs."""
 		blocs = []
 		hist_dir = os.path.join(self.mod_path, "common/history/power_blocs")
-		if not os.path.exists(hist_dir): return blocs
+		if not vfs_exists(hist_dir): return blocs
 
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				# We look for c:TAG ?= { ... create_power_bloc = { name = XXX ... } ... }
 				idx = 0
@@ -4490,7 +4719,7 @@ class Vic3Logic:
 		"""Parses power bloc data for a specific tag from history/global."""
 		clean_tag = tag.replace("c:", "").strip()
 		hist_dir = os.path.join(self.mod_path, "common/history/power_blocs")
-		if not os.path.exists(hist_dir): return None
+		if not vfs_exists(hist_dir): return None
 
 		data = {
 			"key": "", "name": "", "loc_name": "", "loc_adj": "",
@@ -4498,14 +4727,14 @@ class Vic3Logic:
 			"principles": [], "members": []
 		}
 
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
 				if s is not None:
@@ -4596,14 +4825,14 @@ class Vic3Logic:
 	def load_power_bloc_localization(self, key):
 		loc_dir = os.path.join(self.mod_path, "localization", "english")
 		target_file = os.path.join(loc_dir, "mod_power_blocs_l_english.yml")
-		if not os.path.exists(target_file): return "", ""
+		if not vfs_exists(target_file): return "", ""
 
 		name = ""
 		adj = ""
 		try:
-			with open(target_file, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(target_file, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except:
-			with open(target_file, 'r', encoding='utf-8') as f: content = f.read()
+			with vfs_open(target_file, 'r', encoding='utf-8') as f: content = f.read()
 
 		m_name = re.search(r'^\s*' + re.escape(key) + r':\d?\s*"(.*)"', content, re.MULTILINE | re.IGNORECASE)
 		if m_name: name = m_name.group(1)
@@ -4619,15 +4848,15 @@ class Vic3Logic:
 		os.makedirs(loc_dir, exist_ok=True)
 		target_file = os.path.join(loc_dir, "mod_power_blocs_l_english.yml")
 
-		if not os.path.exists(target_file):
-			with open(target_file, 'w', encoding='utf-8-sig') as f:
+		if not vfs_exists(target_file):
+			with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 				f.write("l_english:\n")
 
 		try:
-			with open(target_file, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(target_file, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(target_file, 'r', encoding='utf-8') as f:
+			with vfs_open(target_file, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		# Escape quotes
@@ -4655,7 +4884,7 @@ class Vic3Logic:
 			if not content.endswith("\n"): content += "\n"
 			content += new_line_adj + "\n"
 
-		with open(target_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"[SAVE] Power Bloc localization saved to {target_file}", 'success')
 
@@ -4667,15 +4896,15 @@ class Vic3Logic:
 		target_file = os.path.join(hist_dir, "00_power_blocs.txt")
 
 		# If file doesn't exist, create it with wrapper
-		if not os.path.exists(target_file):
-			with open(target_file, 'w', encoding='utf-8-sig') as f:
+		if not vfs_exists(target_file):
+			with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 				f.write("POWER_BLOCS = {\n}\n")
 
 		try:
-			with open(target_file, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(target_file, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(target_file, 'r', encoding='utf-8') as f:
+			with vfs_open(target_file, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		clean_tag = tag.replace("c:", "").strip()
@@ -4787,7 +5016,7 @@ class Vic3Logic:
 				# Wrap everything? Or append?
 				content += f"POWER_BLOCS = {{\n\tc:{clean_tag} ?= {{{create_block}{extra_block}\n\t}}\n}}"
 
-		with open(target_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"[SAVE] Power Bloc saved for {clean_tag}", 'success')
 
@@ -4795,27 +5024,27 @@ class Vic3Logic:
 		"""Removes power bloc definition for a tag."""
 		self.perform_auto_backup()
 		hist_dir = os.path.join(self.mod_path, "common/history/power_blocs")
-		if not os.path.exists(hist_dir):
+		if not vfs_exists(hist_dir):
 			return
 		clean_tag = tag.replace("c:", "").strip()
 
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f:
+					with vfs_open(path, 'r', encoding='utf-8') as f:
 						content = f.read()
 
 				s, e = self.get_block_range_safe(content, f"c:{clean_tag}")
 				if s is not None:
 					actual_s = s + 1 if (s < len(content) and content[s] in ' \t\r\n') else s
 					content = content[:actual_s] + content[e:]
-					with open(path, 'w', encoding='utf-8-sig') as f:
+					with vfs_open(path, 'w', encoding='utf-8-sig') as f:
 						f.write(content)
 					self.log(f"[REMOVE] Power Bloc removed for {clean_tag}", 'success')
 					return
@@ -4825,16 +5054,16 @@ class Vic3Logic:
 		"""Removes trade routes involving the source tag."""
 		clean_tag = source_tag.replace("c:", "").strip()
 		path = os.path.join(self.mod_path, "common/history/trade")
-		if not os.path.exists(path): return
+		if not vfs_exists(path): return
 
-		for root, _, files in os.walk(path):
+		for root, _, files in vfs_walk(path):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				fpath = os.path.join(root, file)
 				try:
-					with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 				new_content = content
 				file_changed = False
@@ -4866,25 +5095,25 @@ class Vic3Logic:
 						cursor = abs_start + 1
 				
 				if file_changed:
-					with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
+					with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
 					self.log(f"   [CLEAN] Removed trade routes for {clean_tag} in {file}")
 
 	def cleanup_treaties(self, source_tag):
 		"""Removes treaties involving the source tag."""
 		clean_tag = source_tag.replace("c:", "").strip()
 		path = os.path.join(self.mod_path, "common/history/treaties")
-		if not os.path.exists(path):
+		if not vfs_exists(path):
 			return
 
-		for root, _, files in os.walk(path):
+		for root, _, files in vfs_walk(path):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				fpath = os.path.join(root, file)
 				try:
-					with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 				new_content = content
 				file_changed = False
@@ -4915,7 +5144,7 @@ class Vic3Logic:
 						cursor = abs_start + 1
 
 				if file_changed:
-					with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
+					with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
 					self.log(f"   [CLEAN] Removed treaties for {clean_tag} in {file}")
 
 	def update_companies(self, source_tag, target_tag):
@@ -4929,15 +5158,15 @@ class Vic3Logic:
 		]
 		
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					fpath = os.path.join(root, file)
 					try:
-						with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 					
 					new_content = content
 					file_changed = False
@@ -4985,23 +5214,23 @@ class Vic3Logic:
 							cursor = cursor + m2.end()
 
 					if file_changed:
-						with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
+						with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 						self.log(f"   [UPDATE] Transferred companies in {file}")
 
 	def update_military_formations(self, source_tag, target_tag):
 		"""Removes military formations of the annexed tag."""
 		clean_source = source_tag.replace("c:", "").strip()
 		path = os.path.join(self.mod_path, "common/history/military_formations")
-		if not os.path.exists(path): return
+		if not vfs_exists(path): return
 		
-		for root, _, files in os.walk(path):
+		for root, _, files in vfs_walk(path):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				fpath = os.path.join(root, file)
 				try:
-					with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 				
 				new_content = content
 				file_changed = False
@@ -5034,7 +5263,7 @@ class Vic3Logic:
 						cursor = abs_start + 1
 						
 				if file_changed:
-					with open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
+					with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write("".join(new_parts))
 
 	def clean_transferred_state_references(self, transferred_states, new_tag=None):
 		"""
@@ -5046,22 +5275,22 @@ class Vic3Logic:
 		self.log(f"[CLEANUP] Removing references to {len(transferred_states)} transferred states in buildings...")
 
 		buildings_dir = os.path.join(self.mod_path, "common/history/buildings")
-		if not os.path.exists(buildings_dir): return
+		if not vfs_exists(buildings_dir): return
 
 		clean_states = [self.format_state_clean(s) for s in transferred_states]
 		# Use regex for checking if a region is in the list
 		bad_states_pattern = '|'.join(map(re.escape, clean_states))
 		bad_region_re = re.compile(r'region\s*=\s*"?((?:s:)?(?:' + bad_states_pattern + r'))"?', re.IGNORECASE)
 
-		for root, _, files in os.walk(buildings_dir):
+		for root, _, files in vfs_walk(buildings_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				filepath = os.path.join(root, file)
 
 				try:
-					with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 
 				file_modified = False
 
@@ -5254,7 +5483,7 @@ class Vic3Logic:
 						cursor += 1
 
 				if file_modified:
-					with open(filepath, 'w', encoding='utf-8-sig') as f:
+					with vfs_open(filepath, 'w', encoding='utf-8-sig') as f:
 						f.write("".join(new_file_parts))
 					self.log(f"   [CLEANUP] Repatriated invalid ownerships in {file}")
 
@@ -5263,22 +5492,22 @@ class Vic3Logic:
 		self.log(f"[ANNEX] Sanitizing buildings: {old_tag} -> {target_tag}")
 		
 		buildings_dir = os.path.join(self.mod_path, "common/history/buildings")
-		if not os.path.exists(buildings_dir):
+		if not vfs_exists(buildings_dir):
 			return
 
 		clean_old = old_tag.replace("c:", "").strip()
 		clean_target = target_tag.replace("c:", "").strip()
 
-		for root, _, files in os.walk(buildings_dir):
+		for root, _, files in vfs_walk(buildings_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				filepath = os.path.join(root, file)
 				
 				try:
-					with open(filepath, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(filepath, 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(filepath, 'r', encoding='utf-8') as f:
+					with vfs_open(filepath, 'r', encoding='utf-8') as f:
 						content = f.read()
 				
 				new_content = content
@@ -5369,7 +5598,7 @@ class Vic3Logic:
 						cursor = state_abs_start + 1
 				
 				if file_changed:
-					with open(filepath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
+					with vfs_open(filepath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 					self.log(f"   [FIXED] Updated buildings in {file}")
 
 	def scan_state_region_owners(self, state_name):
@@ -5386,17 +5615,17 @@ class Vic3Logic:
 		owners = set()
 
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					s, e = self.get_block_range_safe(content, f"s:{clean_state}")
@@ -5433,10 +5662,10 @@ class Vic3Logic:
 		Province set is empty frozenset when create_state has no owned_provinces block.
 		If state_filter (set of state names) is given, skips inner parsing for other states."""
 		try:
-			with open(filepath, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(filepath, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except Exception:
-			with open(filepath, 'r', encoding='utf-8') as f:
+			with vfs_open(filepath, 'r', encoding='utf-8') as f:
 				content = f.read()
 		result = {}
 		cursor = 0
@@ -5494,8 +5723,8 @@ class Vic3Logic:
 		if self.mod_path:
 			paths.append(os.path.join(self.mod_path, "common/history/states"))
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					partial = self.parse_states_file_ownership(
@@ -5583,17 +5812,17 @@ class Vic3Logic:
 		pattern = re.compile(r"country\s*=\s*c:" + re.escape(clean_tag) + r"\b", re.IGNORECASE)
 
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 					if pattern.search(content):
 						self._country_has_states_cache[clean_tag] = True
@@ -5614,18 +5843,18 @@ class Vic3Logic:
 		if not clean_state: return None, []
 
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					fpath = os.path.join(root, file)
 					try:
-						with open(fpath, 'r', encoding='utf-8-sig') as f:
+						with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(fpath, 'r', encoding='utf-8') as f:
+						with vfs_open(fpath, 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					s, e = self.get_block_range_safe(content, f"s:{clean_state}")
@@ -5650,12 +5879,12 @@ class Vic3Logic:
 			# If we don't have the original file path, we check vanilla again to copy it.
 			if self.vanilla_path:
 				v_path = os.path.join(self.vanilla_path, "game/common/history/states")
-				for root, _, files in os.walk(v_path):
+				for root, _, files in vfs_walk(v_path, overlay=False):
 					for file in files:
 						if not file.endswith(".txt"):
 							continue
 						vf = os.path.join(root, file)
-						with open(vf, 'r', encoding='utf-8', errors='ignore') as f:
+						with vfs_open(vf, 'r', encoding='utf-8', errors='ignore') as f:
 							c = f.read()
 						if f"s:{clean_state}" in c:
 							# Found in vanilla, copy to mod
@@ -5669,16 +5898,16 @@ class Vic3Logic:
 				# Still not found? Create generic
 				fpath = os.path.join(self.mod_path, "common/history/states/99_mod_states.txt")
 				os.makedirs(os.path.dirname(fpath), exist_ok=True)
-				if not os.path.exists(fpath):
-					with open(fpath, 'w', encoding='utf-8-sig') as f:
+				if not vfs_exists(fpath):
+					with vfs_open(fpath, 'w', encoding='utf-8-sig') as f:
 						f.write("STATES = {\n}")
 
 		# 2. Modify file
 		try:
-			with open(fpath, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(fpath, 'r', encoding='utf-8') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		s, e = self.get_block_range_safe(content, f"s:{clean_state}")
@@ -5703,7 +5932,7 @@ class Vic3Logic:
 			else:
 				content += f"\nSTATES = {{{new_entry}\n}}"
 
-		with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
+		with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
 		self.log(f"[SAVE] Homelands for {clean_state} saved to {os.path.basename(fpath)}", 'success')
 
 	def get_state_pop_aggregates(self, state, region_tag=None):
@@ -5779,18 +6008,18 @@ class Vic3Logic:
 				mod_rel = os.path.relpath(fpath, os.path.join(self.vanilla_path, "game"))
 				target_path = os.path.join(self.mod_path, mod_rel)
 				os.makedirs(os.path.dirname(target_path), exist_ok=True)
-				if not os.path.exists(target_path):
+				if not vfs_exists(target_path):
 					shutil.copy2(fpath, target_path)
 
 			try:
-				with open(target_path, 'r', encoding='utf-8-sig') as f:
+				with vfs_open(target_path, 'r', encoding='utf-8-sig') as f:
 					content = f.read()
 			except:
-				with open(target_path, 'r', encoding='utf-8') as f:
+				with vfs_open(target_path, 'r', encoding='utf-8') as f:
 					content = f.read()
 
 			content = self._remove_pops_from_text(content, state, clean_tag)
-			with open(target_path, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 				f.write(content)
 
 		# 3. Add new pops
@@ -5805,15 +6034,15 @@ class Vic3Logic:
 		else:
 			dest_file = os.path.join(self.mod_path, "common/history/pops/99_mod_pops.txt")
 			os.makedirs(os.path.dirname(dest_file), exist_ok=True)
-			if not os.path.exists(dest_file):
-				with open(dest_file, 'w', encoding='utf-8-sig') as f:
+			if not vfs_exists(dest_file):
+				with vfs_open(dest_file, 'w', encoding='utf-8-sig') as f:
 					f.write("POPS = {\n}")
 
 		try:
-			with open(dest_file, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(dest_file, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(dest_file, 'r', encoding='utf-8') as f:
+			with vfs_open(dest_file, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		# Iterate owners and inject
@@ -5902,7 +6131,7 @@ class Vic3Logic:
 				else:
 					content += f"\nPOPS = {{{new_entry}\n}}"	# todo
 
-		with open(dest_file, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(dest_file, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 
 	def _remove_pops_from_text(self, content, state, tag):
@@ -5988,10 +6217,10 @@ class Vic3Logic:
 		processed_files = set() # Relative paths in mod to avoid duplicates
 
 		for p_dir in pop_dirs:
-			if not os.path.exists(p_dir): continue
+			if not vfs_exists(p_dir): continue
 			is_mod_file = self.mod_path in p_dir
 
-			for root, _, files in os.walk(p_dir):
+			for root, _, files in vfs_walk(p_dir, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					fpath = os.path.join(root, file)
@@ -6005,9 +6234,9 @@ class Vic3Logic:
 							continue
 
 					try:
-						with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 					# Find s:STATE
 					# Note: Need to loop as regex findall doesn't give block contents easily for nested stuff
@@ -6161,15 +6390,15 @@ class Vic3Logic:
 				mod_rel = os.path.relpath(fpath, os.path.join(self.vanilla_path, "game"))
 				target_path = os.path.join(self.mod_path, mod_rel)
 				os.makedirs(os.path.dirname(target_path), exist_ok=True)
-				if not os.path.exists(target_path):
+				if not vfs_exists(target_path):
 					shutil.copy2(fpath, target_path)
 
 			# Read (possibly new) file
 			try:
-				with open(target_path, 'r', encoding='utf-8-sig') as f:
+				with vfs_open(target_path, 'r', encoding='utf-8-sig') as f:
 					content = f.read()
 			except:
-				with open(target_path, 'r', encoding='utf-8') as f:
+				with vfs_open(target_path, 'r', encoding='utf-8') as f:
 					content = f.read()
 
 			# We must apply changes from bottom to top to preserve indices!
@@ -6200,7 +6429,7 @@ class Vic3Logic:
 
 				content = content[:s] + new_inner + content[e:]
 
-			with open(target_path, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 				f.write(content)
 			self.log(f"[POPS] Updated total population in {os.path.basename(target_path)}", 'success')
 
@@ -6214,14 +6443,14 @@ class Vic3Logic:
 			mod_rel = os.path.relpath(fpath, os.path.join(self.vanilla_path, "game"))
 			target_path = os.path.join(self.mod_path, mod_rel)
 			os.makedirs(os.path.dirname(target_path), exist_ok=True)
-			if not os.path.exists(target_path):
+			if not vfs_exists(target_path):
 				shutil.copy2(fpath, target_path)
 
 		try:
-			with open(target_path, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(target_path, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(target_path, 'r', encoding='utf-8') as f:
+			with vfs_open(target_path, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		s = pop_entry['indices']['pop_content_start']
@@ -6237,7 +6466,7 @@ class Vic3Logic:
 
 		content = content[:s] + new_inner + content[e:]
 
-		with open(target_path, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.log(f"[POPS] Updated single pop in {os.path.basename(target_path)}", 'success')
 
@@ -6252,8 +6481,8 @@ class Vic3Logic:
 
 		if self.mod_path:
 			m_dir = os.path.join(self.mod_path, "common/history/pops")
-			if os.path.exists(m_dir):
-				for root, _, files in os.walk(m_dir):
+			if vfs_exists(m_dir):
+				for root, _, files in vfs_walk(m_dir):
 					for file in files:
 						if not file.endswith(".txt"):
 							continue
@@ -6263,10 +6492,10 @@ class Vic3Logic:
 		# Scan Content
 		for fpath in files_to_scan:
 			try:
-				with open(fpath, 'r', encoding='utf-8-sig') as f:
+				with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 					content = f.read()
 			except:
-				with open(fpath, 'r', encoding='utf-8') as f:
+				with vfs_open(fpath, 'r', encoding='utf-8') as f:
 					content = f.read()
 
 			cursor = 0
@@ -6435,14 +6664,14 @@ class Vic3Logic:
 				mod_rel = os.path.relpath(fpath, os.path.join(self.vanilla_path, "game"))
 				target_path = os.path.join(self.mod_path, mod_rel)
 				os.makedirs(os.path.dirname(target_path), exist_ok=True)
-				if not os.path.exists(target_path):
+				if not vfs_exists(target_path):
 					shutil.copy2(fpath, target_path)
 
 			try:
-				with open(target_path, 'r', encoding='utf-8-sig') as f:
+				with vfs_open(target_path, 'r', encoding='utf-8-sig') as f:
 					content = f.read()
 			except:
-				with open(target_path, 'r', encoding='utf-8') as f:
+				with vfs_open(target_path, 'r', encoding='utf-8') as f:
 					content = f.read()
 
 			# Reverse sort for safe in-place modification
@@ -6527,17 +6756,17 @@ class Vic3Logic:
 					entry = f"\n\t\t\tcreate_pop = {{ culture = {nc}{rel_str} size = {ns} }}"
 					content = content[:insert_pos] + entry + content[insert_pos:]
 
-			with open(target_path, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 				f.write(content)
 			self.log(f"[CONVERT] Processed {os.path.basename(target_path)}", 'success')
 
 	def add_pop_to_file(self, fpath, state, region_tag, culture, religion, size):
 		self.perform_auto_backup()
 		try:
-			with open(fpath, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(fpath, 'r', encoding='utf-8') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		s, e = self.get_block_range_safe(content, f"s:{state}")
@@ -6572,7 +6801,7 @@ class Vic3Logic:
 				)	# todo: check
 				content = content[:insert_idx] + new_pop + content[insert_idx:]
 
-				with open(fpath, 'w', encoding='utf-8-sig') as f:
+				with vfs_open(fpath, 'w', encoding='utf-8-sig') as f:
 					f.write(content)
 
 	# --- JOURNAL MANAGER LOGIC ---
@@ -6588,17 +6817,17 @@ class Vic3Logic:
 			paths.append(os.path.join(self.vanilla_path, rel_path))
 
 		for p in paths:
-			if not os.path.exists(p):
+			if not vfs_exists(p):
 				continue
-			for root, _, files in os.walk(p):
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					# Regex must handle potential indentation if MULTILINE is used with ^
@@ -6628,19 +6857,19 @@ class Vic3Logic:
 		target_path = None
 		target_content = None
 
-		if not os.path.exists(hist_dir):
+		if not vfs_exists(hist_dir):
 			return # Can't add if directory doesn't exist (or empty mod)
 
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f:
+					with vfs_open(path, 'r', encoding='utf-8') as f:
 						content = f.read()
 
 				# Look for c:TAG block
@@ -6667,7 +6896,7 @@ class Vic3Logic:
 
 			new_content = target_content[:s] + new_block + target_content[e:]
 
-			with open(target_path, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 				f.write(new_content)
 			self.log(f"[HISTORY] Added {je_id} to {os.path.basename(target_path)}", 'success')
 
@@ -6789,12 +7018,12 @@ class Vic3Logic:
 
 		try:
 			current_content = ""
-			if os.path.exists(target_file):
+			if vfs_exists(target_file):
 				try:
-					with open(target_file, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(target_file, 'r', encoding='utf-8-sig') as f:
 						current_content = f.read()
 				except:
-					with open(target_file, 'r', encoding='utf-8') as f:
+					with vfs_open(target_file, 'r', encoding='utf-8') as f:
 						current_content = f.read()
 
 			s, e = self.get_block_range_safe(current_content, je_id)
@@ -6808,7 +7037,7 @@ class Vic3Logic:
 				else:
 					new_content = current_content.rstrip() + "\n\n" + entry_content.lstrip()
 
-			with open(target_file, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(target_file, 'w', encoding='utf-8-sig') as f:
 				f.write(new_content)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save Journal Entry: {e}", 'error')
@@ -6821,12 +7050,12 @@ class Vic3Logic:
 
 		try:
 			loc_content = "l_english:\n"
-			if os.path.exists(loc_file):
+			if vfs_exists(loc_file):
 				try:
-					with open(loc_file, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(loc_file, 'r', encoding='utf-8-sig') as f:
 						loc_content = f.read()
 				except:
-					with open(loc_file, 'r', encoding='utf-8') as f:
+					with vfs_open(loc_file, 'r', encoding='utf-8') as f:
 						loc_content = f.read()
 
 			title = entry_data['title'].replace('"', '\\"')
@@ -6844,7 +7073,7 @@ class Vic3Logic:
 			loc_content = update_key(loc_content, je_id, title)
 			loc_content = update_key(loc_content, f"{je_id}_reason", desc)
 
-			with open(loc_file, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(loc_file, 'w', encoding='utf-8-sig') as f:
 				f.write(loc_content)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save Localization: {e}", 'error')
@@ -6924,12 +7153,12 @@ class Vic3Logic:
 
 		try:
 			current_content = ""
-			if os.path.exists(evt_file):
+			if vfs_exists(evt_file):
 				try:
-					with open(evt_file, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(evt_file, 'r', encoding='utf-8-sig') as f:
 						current_content = f.read()
 				except:
-					with open(evt_file, 'r', encoding='utf-8') as f:
+					with vfs_open(evt_file, 'r', encoding='utf-8') as f:
 						current_content = f.read()
 
 			new_content = current_content
@@ -6947,7 +7176,7 @@ class Vic3Logic:
 					else:
 						new_content = current_content + "\n" + event_content
 
-			with open(evt_file, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(evt_file, 'w', encoding='utf-8-sig') as f:
 				f.write(new_content)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save Event: {e}", 'error')
@@ -6960,12 +7189,12 @@ class Vic3Logic:
 
 		try:
 			loc_content = ""
-			if os.path.exists(loc_file):
+			if vfs_exists(loc_file):
 				try:
-					with open(loc_file, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(loc_file, 'r', encoding='utf-8-sig') as f:
 						loc_content = f.read()
 				except:
-					with open(loc_file, 'r', encoding='utf-8') as f:
+					with vfs_open(loc_file, 'r', encoding='utf-8') as f:
 						loc_content = f.read()
 			else:
 				loc_content = "l_english:\n"
@@ -6977,7 +7206,7 @@ class Vic3Logic:
 				else:
 					loc_content += entry + "\n"
 
-			with open(loc_file, 'w', encoding='utf-8-sig') as f: f.write(loc_content)
+			with vfs_open(loc_file, 'w', encoding='utf-8-sig') as f: f.write(loc_content)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save Event Localization: {e}", 'error')
 			return
@@ -7003,7 +7232,7 @@ class Vic3Logic:
 }}
 """
 		try:
-			with open(target_file, 'a', encoding='utf-8-sig') as f:
+			with vfs_open(target_file, 'a', encoding='utf-8-sig') as f:
 				f.write(content)
 			self.log(f"[SUCCESS] Modifier {mod_name} saved to static_modifiers.", 'success')
 		except Exception as e:
@@ -7017,8 +7246,8 @@ class Vic3Logic:
 
 		try:
 			loc_content = ""
-			if os.path.exists(loc_file):
-				with open(loc_file, 'r', encoding='utf-8-sig') as f: loc_content = f.read()
+			if vfs_exists(loc_file):
+				with vfs_open(loc_file, 'r', encoding='utf-8-sig') as f: loc_content = f.read()
 			else:
 				loc_content = "l_english:\n"
 
@@ -7036,7 +7265,7 @@ class Vic3Logic:
 				else:
 					loc_content += entry + "\n"
 
-			with open(loc_file, 'w', encoding='utf-8-sig') as f: f.write(loc_content)
+			with vfs_open(loc_file, 'w', encoding='utf-8-sig') as f: f.write(loc_content)
 		except Exception as e:
 			self.log(f"[ERROR] Failed to save Modifier Localization: {e}", 'error')
 
@@ -7049,15 +7278,15 @@ class Vic3Logic:
 		]
 
 		for mod_dir in paths:
-			if not os.path.exists(mod_dir): continue
+			if not vfs_exists(mod_dir): continue
 
-			for root, _, files in os.walk(mod_dir):
+			for root, _, files in vfs_walk(mod_dir):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 					# Regex for key = { ... }
 					# Note: this is loose, might match inside blocks, but modifiers are usually top level
@@ -7071,15 +7300,15 @@ class Vic3Logic:
 		"""Scans all events in mod directory."""
 		events = []
 		evt_dir = os.path.join(self.mod_path, "events")
-		if not os.path.exists(evt_dir): return []
+		if not vfs_exists(evt_dir): return []
 
-		for root, _, files in os.walk(evt_dir):
+		for root, _, files in vfs_walk(evt_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 				cursor = 0
 				while True:
@@ -7103,11 +7332,11 @@ class Vic3Logic:
 		"""Scans all journal entries in mod directory."""
 		entries = []
 		je_dir = os.path.join(self.mod_path, "common", "journal_entries")
-		if not os.path.exists(je_dir): return []
+		if not vfs_exists(je_dir): return []
 
 		mod_name = os.path.basename(self.mod_path)
 
-		for root, _, files in os.walk(je_dir):
+		for root, _, files in vfs_walk(je_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				# Filter to only show entries created in the mod (matching mod name)
@@ -7115,9 +7344,9 @@ class Vic3Logic:
 				if not file.lower().startswith(mod_name.lower()): continue
 
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 				cursor = 0
 				while True:
@@ -7138,16 +7367,16 @@ class Vic3Logic:
 
 	def get_journal_entry_data(self, je_id):
 		je_dir = os.path.join(self.mod_path, "common", "journal_entries")
-		if not os.path.exists(je_dir): return None
+		if not vfs_exists(je_dir): return None
 
-		for root, _, files in os.walk(je_dir):
+		for root, _, files in vfs_walk(je_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				s, e = self.get_block_range_safe(content, je_id)
 				if s is not None:
@@ -7179,14 +7408,14 @@ class Vic3Logic:
 		name = ""
 		desc = ""
 
-		if os.path.exists(loc_dir):
-			for root, _, files in os.walk(loc_dir):
+		if vfs_exists(loc_dir):
+			for root, _, files in vfs_walk(loc_dir):
 				for file in files:
 					if not file.endswith(".yml"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 					if not name:
 						m = re.search(r"^\s*" + re.escape(je_id) + r":\d?\s*\"(.*)\"", content, re.MULTILINE)
@@ -7204,16 +7433,16 @@ class Vic3Logic:
 
 	def get_event_data(self, event_id):
 		evt_dir = os.path.join(self.mod_path, "events")
-		if not os.path.exists(evt_dir): return None
+		if not vfs_exists(evt_dir): return None
 
-		for root, _, files in os.walk(evt_dir):
+		for root, _, files in vfs_walk(evt_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				s, e = self.get_block_range_safe(content, event_id)
 				if s is not None:
@@ -7274,15 +7503,15 @@ class Vic3Logic:
 
 	def get_loc_text(self, key):
 		loc_dir = os.path.join(self.mod_path, "localization", "english")
-		if not os.path.exists(loc_dir): return key
+		if not vfs_exists(loc_dir): return key
 
-		for root, _, files in os.walk(loc_dir):
+		for root, _, files in vfs_walk(loc_dir):
 			for file in files:
 				if not file.endswith(".yml"): continue
 				try:
-					with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 				m = re.search(r"^\s*" + re.escape(key) + r":\d?\s*\"(.*)\"", content, re.MULTILINE)
 				if m: return m.group(1)
@@ -7296,14 +7525,14 @@ class Vic3Logic:
 		if self.mod_path: paths.append(os.path.join(self.mod_path, "common/history/buildings"))
 
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					try:
-						with open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(os.path.join(root, file), 'r', encoding='utf-8') as f: content = f.read()
 
 					matches = re.findall(r'building\s*=\s*"([^"]+)"', content)
 					# Strip building_ prefix
@@ -7315,10 +7544,10 @@ class Vic3Logic:
 	def _scan_file_for_buildings(self, fpath, clean_state, buildings_list, is_mod):	# todo
 		start_count = len(buildings_list)
 		try:
-			with open(fpath, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(fpath, 'r', encoding='utf-8') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		# Search s:STATE
@@ -7420,8 +7649,8 @@ class Vic3Logic:
 		# 1. Mod
 		if self.mod_path:
 			mod_b = os.path.join(self.mod_path, "common/history/buildings")
-			if os.path.exists(mod_b):
-				for root, _, files in os.walk(mod_b):
+			if vfs_exists(mod_b):
+				for root, _, files in vfs_walk(mod_b, overlay=False):
 					for file in files:
 						if not file.endswith(".txt"): continue
 						fpath = os.path.join(root, file)
@@ -7432,8 +7661,8 @@ class Vic3Logic:
 		# 2. Vanilla
 		if self.vanilla_path:
 			van_b = os.path.join(self.vanilla_path, "game/common/history/buildings")
-			if os.path.exists(van_b):
-				for root, _, files in os.walk(van_b):
+			if vfs_exists(van_b):
+				for root, _, files in vfs_walk(van_b, overlay=False):
 					for file in files:
 						if not file.endswith(".txt"): continue
 						fpath = os.path.join(root, file)
@@ -7456,13 +7685,13 @@ class Vic3Logic:
 			mod_rel = os.path.relpath(fpath, os.path.join(self.vanilla_path, "game"))
 			target_path = os.path.join(self.mod_path, mod_rel)
 			os.makedirs(os.path.dirname(target_path), exist_ok=True)
-			if not os.path.exists(target_path):
+			if not vfs_exists(target_path):
 				shutil.copy2(fpath, target_path)
 
 		try:
-			with open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
+			with vfs_open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
 		except:
-			with open(target_path, 'r', encoding='utf-8') as f: content = f.read()
+			with vfs_open(target_path, 'r', encoding='utf-8') as f: content = f.read()
 
 		s = building_entry['indices']['start']
 		e = building_entry['indices']['end']
@@ -7471,7 +7700,7 @@ class Vic3Logic:
 			# Remove the block
 			content = content[:s].rstrip() + content[e:]
 			self.log(f"[BUILDING] Removed {building_entry['type']} from {os.path.basename(target_path)}", 'success')
-			with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
+			with vfs_open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
 			return
 
 		# --- UPDATE LOGIC ---
@@ -7622,7 +7851,7 @@ class Vic3Logic:
 			content = content[:s] + block + content[e:]
 			self.log(f"[BUILDING] Updated {building_entry['type']}", 'success')
 
-		with open(target_path, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 
 	def add_state_building(self, state_name, land_owner_tag, building_owner_tag, building_type, level):
@@ -7638,17 +7867,17 @@ class Vic3Logic:
 		# Check Mod First
 		if self.mod_path:
 			mod_b = os.path.join(self.mod_path, "common/history/buildings")
-			if os.path.exists(mod_b):
-				for root, _, files in os.walk(mod_b):
+			if vfs_exists(mod_b):
+				for root, _, files in vfs_walk(mod_b):
 					for file in files:
 						if not file.endswith(".txt"):
 							continue
 						curr_path = os.path.join(root, file)
 						try:
-							with open(curr_path, 'r', encoding='utf-8-sig') as f:
+							with vfs_open(curr_path, 'r', encoding='utf-8-sig') as f:
 								c = f.read()
 						except:
-							with open(curr_path, 'r', encoding='utf-8') as f:
+							with vfs_open(curr_path, 'r', encoding='utf-8') as f:
 								c = f.read()
 
 						if f"s:{clean_state}" in c:
@@ -7663,17 +7892,17 @@ class Vic3Logic:
 		else:
 			target_path = os.path.join(self.mod_path, "common/history/buildings/99_mod_buildings.txt")
 			os.makedirs(os.path.dirname(target_path), exist_ok=True)
-			if not os.path.exists(target_path):
-				with open(target_path, 'w', encoding='utf-8-sig') as f:
+			if not vfs_exists(target_path):
+				with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 					f.write("BUILDINGS = {\n}")
 			target_content = "BUILDINGS = {\n}"
 
 		# Re-read
 		try:
-			with open(target_path, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(target_path, 'r', encoding='utf-8-sig') as f:
 				target_content = f.read()
 		except:
-			with open(target_path, 'r', encoding='utf-8') as f:
+			with vfs_open(target_path, 'r', encoding='utf-8') as f:
 				target_content = f.read()
 
 		# Construct Building Block
@@ -7743,7 +7972,7 @@ class Vic3Logic:
 			else:
 				target_content += f"\nBUILDINGS = {{{new_entry}\n}}"	# todo: check
 
-		with open(target_path, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 			f.write(target_content)
 		self.log(f"[BUILDING] Added {building_type} to {clean_state} (Land: {clean_land_owner}, Owner: {clean_building_owner})", 'success')
 
@@ -7860,18 +8089,18 @@ class Vic3Logic:
 
 		for rel_dir, top_re, do_inner, do_member in dir_configs:
 			dir_path = os.path.join(self.mod_path, rel_dir)
-			if not os.path.exists(dir_path):
+			if not vfs_exists(dir_path):
 				continue
-			for root, _, files in os.walk(dir_path):
+			for root, _, files in vfs_walk(dir_path):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					fpath = os.path.join(root, file)
 					try:
-						with open(fpath, 'r', encoding='utf-8-sig') as f:
+						with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 							file_content = f.read()
 					except:
-						with open(fpath, 'r', encoding='utf-8') as f:
+						with vfs_open(fpath, 'r', encoding='utf-8') as f:
 							file_content = f.read()
 
 					if not tag_re.search(file_content):
@@ -7931,7 +8160,7 @@ class Vic3Logic:
 						new_content = '\n'.join(new_lines)
 
 					if new_content != file_content:
-						with open(fpath, 'w', encoding='utf-8-sig') as f:
+						with vfs_open(fpath, 'w', encoding='utf-8-sig') as f:
 							f.write(new_content)
 						self.log(f"   [CLEAN] Commented out {clean_tag} references in {rel_dir}/{file}")
 
@@ -7958,7 +8187,7 @@ class Vic3Logic:
 			clean_transferred.add(k)
 
 		hist_dir = os.path.join(self.mod_path, "common/history/countries")
-		if not os.path.exists(hist_dir):
+		if not vfs_exists(hist_dir):
 			return
 
 		# Pattern matches: set_capital = s:STATE_X  or  set_capital = STATE_X  (with optional quotes)
@@ -7970,16 +8199,16 @@ class Vic3Logic:
 		for old_tag in old_owners:
 			clean_old = old_tag.replace("c:", "").strip().upper()
 
-			for root, _, files in os.walk(hist_dir):
+			for root, _, files in vfs_walk(hist_dir):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					fpath = os.path.join(root, file)
 					try:
-						with open(fpath, 'r', encoding='utf-8-sig') as f:
+						with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 							content = f.read()
 					except:
-						with open(fpath, 'r', encoding='utf-8') as f:
+						with vfs_open(fpath, 'r', encoding='utf-8') as f:
 							content = f.read()
 
 					# Only bother with files that mention this country and set_capital
@@ -8018,7 +8247,7 @@ class Vic3Logic:
 						idx = s + len(new_block)
 
 					if changed:
-						with open(fpath, 'w', encoding='utf-8-sig') as f:
+						with vfs_open(fpath, 'w', encoding='utf-8-sig') as f:
 							f.write(new_content)
 
 	def perform_annexation_cleanup(self, old_tag, new_tag, transferred_states):
@@ -8035,16 +8264,16 @@ class Vic3Logic:
 	def clean_lobbies_for_annexed(self, tag):
 		"""Scans lobbies file and removes any lobby for or targeting the annexed tag."""
 		lobby_file = os.path.join(self.mod_path, "common/history/lobbies/00_lobbies.txt")
-		if not os.path.exists(lobby_file):
+		if not vfs_exists(lobby_file):
 			return
 
 		clean_tag = tag.replace("c:", "").strip()
 
 		try:
-			with open(lobby_file, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(lobby_file, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(lobby_file, 'r', encoding='utf-8') as f:
+			with vfs_open(lobby_file, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		changed = False
@@ -8136,7 +8365,7 @@ class Vic3Logic:
 				cursor = brace_pos + 1
 
 		if changed:
-			with open(lobby_file, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(lobby_file, 'w', encoding='utf-8-sig') as f:
 				f.write(content)
 			self.log(f"[LOBBY] Cleaned up lobbies associated with {clean_tag}", 'success')
 
@@ -8150,21 +8379,21 @@ class Vic3Logic:
 		# If user wants to edit vanilla, they must copy it first. We can warn if only found in vanilla?
 		# For now scan mod only for editing.
 		
-		if not os.path.exists(mil_dir):
+		if not vfs_exists(mil_dir):
 			return []
 
 		clean_tag = tag.replace("c:", "").strip()
 
-		for root, _, files in os.walk(mil_dir):
+		for root, _, files in vfs_walk(mil_dir):
 			for file in files:
 				if not file.endswith(".txt"):
 					continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 						content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f:
+					with vfs_open(path, 'r', encoding='utf-8') as f:
 						content = f.read()
 
 				# Find c:TAG block
@@ -8305,14 +8534,14 @@ class Vic3Logic:
 
 	def delete_military_formation(self, file_path, scope_id):
 		self.perform_auto_backup()
-		if not os.path.exists(file_path):
+		if not vfs_exists(file_path):
 			return False
 		
 		try:
-			with open(file_path, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(file_path, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(file_path, 'r', encoding='utf-8') as f:
+			with vfs_open(file_path, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		# We need to find the specific formation block again.
@@ -8337,14 +8566,14 @@ class Vic3Logic:
 		fid = formation_data['id']
 		name = formation_data['name']
 		
-		if not os.path.exists(file_path):
+		if not vfs_exists(file_path):
 			return False
 		
 		try:
-			with open(file_path, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(file_path, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(file_path, 'r', encoding='utf-8') as f:
+			with vfs_open(file_path, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		# Locate the block
@@ -8392,7 +8621,7 @@ class Vic3Logic:
 			# Also clean up empty country block?
 			# Replace with newline
 			new_content = content[:found_start] + f"# Deleted Formation {name}\n" + content[found_end:]
-			with open(file_path, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(file_path, 'w', encoding='utf-8-sig') as f:
 				f.write(new_content)
 			self.log(f"[MIL] Deleted formation '{name}' from {os.path.basename(file_path)}")
 			return True
@@ -8410,14 +8639,14 @@ class Vic3Logic:
 		file_path = formation_data['file']
 		fid = formation_data['id']
 		
-		if not os.path.exists(file_path):
+		if not vfs_exists(file_path):
 			return False
 		
 		try:
-			with open(file_path, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(file_path, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(file_path, 'r', encoding='utf-8') as f:
+			with vfs_open(file_path, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		found_start = -1
@@ -8526,7 +8755,7 @@ class Vic3Logic:
 
 			final_content = content[:found_start] + "create_military_formation = " + new_block + content[found_end:]
 			
-			with open(file_path, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(file_path, 'w', encoding='utf-8-sig') as f:
 				f.write(final_content)
 			self.log(f"[MIL] Updated formation '{new_name}'")
 			return True
@@ -8813,15 +9042,15 @@ class StateManager:
 			paths.append(os.path.join(self.logic.vanilla_path, "game/map_data/state_regions"))
 
 		for p in reversed(paths):
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					filepath = os.path.join(root, file)
 					try:
-						with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 
 					cursor = 0
 					while True:
@@ -8907,13 +9136,13 @@ class StateManager:
 					mod_rel = os.path.relpath(fpath, os.path.join(self.logic.vanilla_path, "game"))
 					target_path = os.path.join(self.logic.mod_path, mod_rel)
 					os.makedirs(os.path.dirname(target_path), exist_ok=True)
-					if not os.path.exists(target_path):
+					if not vfs_exists(target_path):
 						shutil.copy2(fpath, target_path)
 
 				try:
-					with open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(target_path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(target_path, 'r', encoding='utf-8') as f: content = f.read()
 
 				file_changed = False
 				for p in file_pops:
@@ -8942,7 +9171,7 @@ class StateManager:
 							})
 
 				if file_changed:
-					with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
+					with vfs_open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
 
 		# Write new pops
 		if new_pops_list:
@@ -8972,9 +9201,9 @@ class StateManager:
 
 			# Read Existing
 			existing_content = ""
-			if os.path.exists(new_pop_file):
+			if vfs_exists(new_pop_file):
 				try:
-					with open(new_pop_file, 'r', encoding='utf-8-sig') as f: existing_content = f.read()
+					with vfs_open(new_pop_file, 'r', encoding='utf-8-sig') as f: existing_content = f.read()
 				except: pass
 
 			if not existing_content.strip():
@@ -9026,7 +9255,7 @@ class StateManager:
 
 				final_content = final_content[:s_start] + state_block + final_content[s_end:]
 
-			with open(new_pop_file, 'w', encoding='utf-8-sig') as f: f.write(final_content)
+			with vfs_open(new_pop_file, 'w', encoding='utf-8-sig') as f: f.write(final_content)
 			self.logic.log(f"[ASSETS] Transferred {len(new_pops_list)} pop groups to {new_state_id}")
 
 		# 2. Buildings Transfer
@@ -9052,13 +9281,13 @@ class StateManager:
 					mod_rel = os.path.relpath(fpath, os.path.join(self.logic.vanilla_path, "game"))
 					target_path = os.path.join(self.logic.mod_path, mod_rel)
 					os.makedirs(os.path.dirname(target_path), exist_ok=True)
-					if not os.path.exists(target_path):
+					if not vfs_exists(target_path):
 						shutil.copy2(fpath, target_path)
 
 				try:
-					with open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(target_path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(target_path, 'r', encoding='utf-8') as f: content = f.read()
 
 				file_changed = False
 				for b in file_bldgs:
@@ -9093,7 +9322,7 @@ class StateManager:
 							})
 
 				if file_changed:
-					with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
+					with vfs_open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
 
 		if new_b_list:
 			b_dir = os.path.join(self.logic.mod_path, "common/history/buildings")
@@ -9134,15 +9363,15 @@ class StateManager:
 			b_content += "\n}"
 
 			final_content = b_content
-			if os.path.exists(new_b_file):
+			if vfs_exists(new_b_file):
 				try:
-					with open(new_b_file, 'r', encoding='utf-8-sig') as f:
+					with vfs_open(new_b_file, 'r', encoding='utf-8-sig') as f:
 						existing = f.read()
 					final_content = existing + "\n" + b_content
 				except:
 					pass
 
-			with open(new_b_file, 'w', encoding='utf-8-sig') as f:
+			with vfs_open(new_b_file, 'w', encoding='utf-8-sig') as f:
 				f.write(final_content)
 			self.logic.log(f"[ASSETS] Transferred {len(new_b_list)} building levels to {new_state_id}")
 
@@ -9251,17 +9480,17 @@ class StateManager:
 
 		for folder in dirs:
 			hist_dir = os.path.join(self.logic.mod_path, "common", "history", folder)
-			if not os.path.exists(hist_dir): continue
+			if not vfs_exists(hist_dir): continue
 
-			for root, _, files in os.walk(hist_dir):
+			for root, _, files in vfs_walk(hist_dir):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					fpath = os.path.join(root, file)
 
 					try:
-						with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 					# Find s:STATE_ID = { ... }
 					s_start, s_end = self.logic.get_block_range_safe(content, f"s:{state_id}")
@@ -9269,7 +9498,7 @@ class StateManager:
 					if s_start is not None:
 						# Remove the block
 						new_content = content[:s_start] + content[s_end:]
-						with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
+						with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 						self.logic.log(f"[CLEANUP] Removed {state_id} from history/{folder}/{file}")
 
 	def create_new_state(self, state_name_key, owner_data, province_list):
@@ -9350,10 +9579,10 @@ class StateManager:
 		os.makedirs(hist_dir, exist_ok=True)
 		# Check if any file contains s:STATE_ID
 		found_hist = False
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for f in files:
 				if f.endswith(".txt"):
-					with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as fh:
+					with vfs_open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as fh:
 						# Use regex to avoid partial matches (e.g. s:STATE_1 inside s:STATE_10)
 						if re.search(r"s:" + re.escape(state_id) + r"\s*(=|\?=)\s*\{", fh.read()):
 							found_hist = True
@@ -9364,20 +9593,20 @@ class StateManager:
 			# Create new history file
 			new_hist_path = os.path.join(hist_dir, "99_custom_states.txt")
 			# If 99_custom_states exists, append. Else create.
-			if not os.path.exists(new_hist_path):
-				with open(new_hist_path, 'w', encoding='utf-8-sig') as f:
+			if not vfs_exists(new_hist_path):
+				with vfs_open(new_hist_path, 'w', encoding='utf-8-sig') as f:
 					f.write("STATES = {\n")
 					f.write(f"\ts:{state_id} = {{\n\t}}\n")
 					f.write("}\n")
 			else:
 				# Append if not present in file, otherwise rely on update
-				with open(new_hist_path, 'r', encoding='utf-8-sig') as f: content = f.read()
+				with vfs_open(new_hist_path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				# Use regex to avoid partial matches
 				if not re.search(r"s:" + re.escape(state_id) + r"\s*(=|\?=)\s*\{", content):
 					idx = content.rfind('}')
 					if idx != -1:
 						new_content = content[:idx] + f"\n\ts:{state_id} = {{\n\t}}\n" + content[idx:]
-						with open(new_hist_path, 'w', encoding='utf-8-sig') as f: f.write(new_content)
+						with vfs_open(new_hist_path, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 
 		# Transfer Assets (Pops & Buildings)
 		total_pop = self.transfer_state_assets(state_id, primary_owner, source_ratios)
@@ -9423,19 +9652,19 @@ class StateManager:
 		os.makedirs(loc_dir, exist_ok=True)
 		fpath = os.path.join(loc_dir, "map_l_english.yml")
 
-		if not os.path.exists(fpath):
-			with open(fpath, 'w', encoding='utf-8-sig') as f:
+		if not vfs_exists(fpath):
+			with vfs_open(fpath, 'w', encoding='utf-8-sig') as f:
 				f.write("l_english:\n")
 
 		try:
-			with open(fpath, 'r', encoding='utf-8-sig') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8-sig') as f:
 				content = f.read()
 		except:
-			with open(fpath, 'r', encoding='utf-8') as f:
+			with vfs_open(fpath, 'r', encoding='utf-8') as f:
 				content = f.read()
 
 		if state_id + ":" not in content:
-			with open(fpath, 'a', encoding='utf-8-sig') as f:
+			with vfs_open(fpath, 'a', encoding='utf-8-sig') as f:
 				f.write(f' {state_id}:0 "{name}"\n')
 
 	def _init_history(self, state_id, owner_tag):
@@ -9458,7 +9687,7 @@ class StateManager:
 		}}
 	}}
 }}"""	# todo: redo
-		with open(fpath, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(fpath, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 
 	def _format_owned_provinces_block(self, provinces, indent="\t\t\t"):
@@ -9489,15 +9718,15 @@ class StateManager:
 		target_content = None
 
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
 					filepath = os.path.join(root, file)
 					try:
-						with open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
+						with vfs_open(filepath, 'r', encoding='utf-8-sig') as f: content = f.read()
 					except:
-						with open(filepath, 'r', encoding='utf-8') as f: content = f.read()
+						with vfs_open(filepath, 'r', encoding='utf-8') as f: content = f.read()
 
 					if re.search(r"(^|\s)" + re.escape(clean_reg) + r"\s*=\s*\{", content):
 						target_file = filepath
@@ -9530,7 +9759,7 @@ class StateManager:
 								new_block = block[:ss + 1] + new_states + block[se - 1:]
 								target_content = target_content[:s] + new_block + target_content[e:]
 
-								with open(target_file, 'w', encoding='utf-8-sig') as f: f.write(target_content)
+								with vfs_open(target_file, 'w', encoding='utf-8-sig') as f: f.write(target_content)
 								self.logic.log(f"Added {state_id} to {clean_reg} in {os.path.basename(target_file)}")
 
 	def update_history_provinces(self, state_id, added_data, removed_list):
@@ -9556,19 +9785,19 @@ class StateManager:
 
 		# Scan all history files for this state
 		hist_dir = os.path.join(self.logic.mod_path, "common", "history", "states")
-		if not os.path.exists(hist_dir): return
+		if not vfs_exists(hist_dir): return
 
 		files_to_check = []
-		for root, _, files in os.walk(hist_dir):
+		for root, _, files in vfs_walk(hist_dir):
 			for file in files:
 				if file.endswith(".txt"):
 					files_to_check.append(os.path.join(root, file))
 
 		for fpath in files_to_check:
 			try:
-				with open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
+				with vfs_open(fpath, 'r', encoding='utf-8-sig') as f: content = f.read()
 			except:
-				with open(fpath, 'r', encoding='utf-8') as f: content = f.read()
+				with vfs_open(fpath, 'r', encoding='utf-8') as f: content = f.read()
 
 			file_changed = False
 			cursor = 0
@@ -9768,7 +9997,7 @@ class StateManager:
 					cursor += 1
 
 			if file_changed:
-				with open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
+				with vfs_open(fpath, 'w', encoding='utf-8-sig') as f: f.write(content)
 				self.logic.log(f"[HIST] Updated owned_provinces in {os.path.basename(fpath)} for {state_id}")
 
 	def save_state_region(self, state_id):
@@ -9782,17 +10011,17 @@ class StateManager:
 			target_path = os.path.join(self.logic.mod_path, "map_data", "state_regions", fname)
 			os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
-			if sobj.file_path and os.path.exists(sobj.file_path):
-				if not os.path.exists(target_path):
+			if sobj.file_path and vfs_exists(sobj.file_path):
+				if not vfs_exists(target_path):
 					shutil.copy2(sobj.file_path, target_path)
 
 		os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
-		if os.path.exists(target_path):
+		if vfs_exists(target_path):
 			try:
-				with open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
+				with vfs_open(target_path, 'r', encoding='utf-8-sig') as f: content = f.read()
 			except:
-				with open(target_path, 'r', encoding='utf-8') as f: content = f.read()
+				with vfs_open(target_path, 'r', encoding='utf-8') as f: content = f.read()
 		else:
 			content = ""
 
@@ -9803,7 +10032,7 @@ class StateManager:
 				s, e = self.logic.find_block_content(content, m.end() - 1)
 				if s:
 					content = content[:m.start()] + content[e:]
-					with open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
+					with vfs_open(target_path, 'w', encoding='utf-8-sig') as f: f.write(content)
 					self.logic.log(f"[MAP] Removed empty state {state_id} from {os.path.basename(target_path)}")
 
 					# Clean up related history entries to prevent NULL_STATE errors
@@ -9865,7 +10094,7 @@ class StateManager:
 		else:
 			content += new_block
 
-		with open(target_path, 'w', encoding='utf-8-sig') as f:
+		with vfs_open(target_path, 'w', encoding='utf-8-sig') as f:
 			f.write(content)
 		self.logic.log(f"Saved state geometry to {os.path.basename(target_path)}")
 
@@ -9888,23 +10117,23 @@ class StateManager:
 		folders = ["pops", "buildings"]
 		for folder in folders:
 			target_dir = os.path.join(self.logic.mod_path, "common/history", folder)
-			if not os.path.exists(target_dir):
+			if not vfs_exists(target_dir):
 				continue
 
 			# Find file containing s:OLD_STATE
 			old_file_path = None
 			old_file_content = None
 
-			for root, _, files in os.walk(target_dir):
+			for root, _, files in vfs_walk(target_dir):
 				for file in files:
 					if not file.endswith(".txt"):
 						continue
 					path = os.path.join(root, file)
 					try:
-						with open(path, 'r', encoding='utf-8-sig') as f:
+						with vfs_open(path, 'r', encoding='utf-8-sig') as f:
 							c = f.read()
 					except:
-						with open(path, 'r', encoding='utf-8') as f:
+						with vfs_open(path, 'r', encoding='utf-8') as f:
 							c = f.read()
 
 					if re.search(r"s:" + re.escape(old_state_id) + r"\s*=\s*\{", c):
@@ -9932,20 +10161,20 @@ class StateManager:
 							# Remove from old file
 							new_state_block = state_block[:m_rs.start()] + state_block[rs_e:]
 							new_file_content = old_file_content[:s] + new_state_block + old_file_content[e:]
-							with open(old_file_path, 'w', encoding='utf-8-sig') as f: f.write(new_file_content)
+							with vfs_open(old_file_path, 'w', encoding='utf-8-sig') as f: f.write(new_file_content)
 
 							# Add to new state file
 							new_file_path = None
 							new_file_content = None
 
-							for root, _, files in os.walk(target_dir):
+							for root, _, files in vfs_walk(target_dir):
 								for file in files:
 									if not file.endswith(".txt"): continue
 									path = os.path.join(root, file)
 									try:
-										with open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
+										with vfs_open(path, 'r', encoding='utf-8-sig') as f: c = f.read()
 									except:
-										with open(path, 'r', encoding='utf-8') as f: c = f.read()
+										with vfs_open(path, 'r', encoding='utf-8') as f: c = f.read()
 
 									if re.search(r"s:" + re.escape(new_state_id) + r"\s*=\s*\{", c):
 										new_file_path = path
@@ -9957,8 +10186,8 @@ class StateManager:
 								new_file_path = os.path.join(target_dir, f"99_custom_{new_state_id}.txt")
 								wrapper = "POPS" if folder == "pops" else "BUILDINGS"
 								new_file_content = f"{wrapper} = {{\n\ts:{new_state_id} = {{\n\t}}\n}}"
-								if os.path.exists(new_file_path):
-									with open(new_file_path, 'r', encoding='utf-8-sig') as f:
+								if vfs_exists(new_file_path):
+									with vfs_open(new_file_path, 'r', encoding='utf-8-sig') as f:
 										new_file_content = f.read()
 
 							ns, ne = self.logic.get_block_range_safe(new_file_content, f"s:{new_state_id}")
@@ -9984,7 +10213,7 @@ class StateManager:
 									updated_ns_block = ns_block[:last_brace].rstrip() + "\n\t\t" + to_append + "\n\t}"
 									new_file_content = new_file_content[:ns] + updated_ns_block + new_file_content[ne:]
 
-								with open(new_file_path, 'w', encoding='utf-8-sig') as f: f.write(new_file_content)
+								with vfs_open(new_file_path, 'w', encoding='utf-8-sig') as f: f.write(new_file_content)
 								self.logic.log(f"Moved orphaned {folder} for {tag} from {old_state_id} to {new_state_id}")
 
 		# 2. MILITARY
@@ -9992,20 +10221,20 @@ class StateManager:
 
 	def _move_orphaned_military(self, old_state, tag, new_state):
 		mil_dir = os.path.join(self.logic.mod_path, "common/history/military_formations")
-		if not os.path.exists(mil_dir): return
+		if not vfs_exists(mil_dir): return
 
 		old_clean = self.logic.normalize_state_key(old_state).replace("s:", "")
 		new_clean = self.logic.normalize_state_key(new_state).replace("s:", "")
 		clean_tag = tag.replace("c:", "")
 
-		for root, _, files in os.walk(mil_dir):
+		for root, _, files in vfs_walk(mil_dir):
 			for file in files:
 				if not file.endswith(".txt"): continue
 				path = os.path.join(root, file)
 				try:
-					with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
 				except:
-					with open(path, 'r', encoding='utf-8') as f: content = f.read()
+					with vfs_open(path, 'r', encoding='utf-8') as f: content = f.read()
 
 				current_idx = 0
 				file_mod = False
@@ -10029,7 +10258,7 @@ class StateManager:
 						current_idx = c_end
 
 				if file_mod:
-					with open(path, 'w', encoding='utf-8-sig') as f: f.write(new_content)
+					with vfs_open(path, 'w', encoding='utf-8-sig') as f: f.write(new_content)
 					self.logic.log(f"Moved military units for {tag} from {old_clean} to {new_clean}")
 
 class App(tk.Tk):
@@ -10087,28 +10316,33 @@ class App(tk.Tk):
 
 	def load_config(self):
 		try:
-			if os.path.exists("config.json"):
-				with open("config.json", "r") as f:
+			if vfs_exists("config.json"):
+				with vfs_open("config.json", "r") as f:
 					data = json.load(f)
+					self.logic.fallback_mods = set(data.get("vanilla_fallback_mods", []))
 					path = data.get("mod_path", "")
-					if os.path.exists(path):
+					if vfs_exists(path):
 						self.path_var.set(path)
 						self.logic.set_mod_path(path)
 						self.log_message(f"Loaded Mod Path: {path}")
 
 					v_path = data.get("vanilla_path", "")
-					if os.path.exists(v_path):
+					if vfs_exists(v_path):
 						self.vanilla_path_var.set(v_path)
 						self.logic.set_vanilla_path(v_path)
 						self.log_message(f"Loaded Vanilla Path: {v_path}")
+					if self.logic.use_vanilla_fallback:
+						self.log_message("Vanilla fallback ON for this mod.", 'info')
 		except: pass
+		self._sync_fallback_var()
 
 	def save_config(self):
 		try:
-			with open("config.json", "w") as f:
+			with vfs_open("config.json", "w") as f:
 				json.dump({
 					"mod_path": self.path_var.get(),
-					"vanilla_path": self.vanilla_path_var.get()
+					"vanilla_path": self.vanilla_path_var.get(),
+					"vanilla_fallback_mods": sorted(self.logic.fallback_mods)
 				}, f)
 		except: pass
 
@@ -10158,6 +10392,9 @@ class App(tk.Tk):
 
 		self.autobackup_var = tk.BooleanVar(value=self.logic.auto_backup_enabled)
 		ttk.Checkbutton(header_frame, text="Auto-backup", variable=self.autobackup_var, command=self.toggle_auto_backup).pack(side=tk.RIGHT, padx=5)
+
+		self.fallback_var = tk.BooleanVar(value=False)
+		ttk.Checkbutton(header_frame, text="Use vanilla files (no full copy)", variable=self.fallback_var, command=self.toggle_vanilla_fallback).pack(side=tk.RIGHT, padx=5)
 
 		ttk.Button(header_frame, text="Backup Current Mod", command=self.start_backup).pack(side=tk.RIGHT, padx=5)
 		ttk.Button(header_frame, text="Mod Manager", command=self.show_mod_manager_ui).pack(side=tk.RIGHT, padx=5)
@@ -10267,7 +10504,7 @@ class App(tk.Tk):
 
 	def ensure_vanilla_path(self):
 		path = self.vanilla_path_var.get()
-		if path and os.path.exists(path):
+		if path and vfs_exists(path):
 			return path
 
 		messagebox.showinfo("Setup", r"Select the victoria 3/game folder, e.g: C:\Program Files (x86)\Steam\steamapps\common\Victoria 3\game")
@@ -10292,12 +10529,22 @@ class App(tk.Tk):
 			self.path_var.set(mod_path)
 			self.save_config()
 
-			# Ask if user wants to copy vanilla files now
-			if messagebox.askyesno("Setup", "Copy vanilla files to new mod now?"):
+			choice = messagebox.askyesnocancel("Setup",
+				"Use vanilla files for this mod instead of copying them?\n\n"
+				"Yes: copy nothing now. Files the mod lacks are read from vanilla, and a vanilla file is copied into the mod only when a change modifies it.\n"
+				"No: copy the full set of vanilla files into the mod now.\n"
+				"Cancel: do neither.")
+			if choice is True:
+				if self.ensure_vanilla_path():
+					self.logic.set_vanilla_fallback(True)
+					self.save_config()
+					self.log_message("Vanilla fallback ON for this mod.", 'success')
+			elif choice is False:
 				v_path = self.ensure_vanilla_path()
 				if v_path:
 					self.log_message("Starting file copy...", 'info')
 					threading.Thread(target=self.logic.copy_vanilla_files, args=(v_path, mod_path), daemon=True).start()
+			self._sync_fallback_var()
 
 			messagebox.showinfo("Success", f"Mod '{name}' created and loaded.")
 
@@ -10321,6 +10568,26 @@ class App(tk.Tk):
 			messagebox.showerror("Error", "Mod path not selected.")
 			return
 		self.logic.backup_mod(mod_path)
+
+	def _sync_fallback_var(self):
+		if hasattr(self, 'fallback_var'):
+			self.fallback_var.set(self.logic.use_vanilla_fallback)
+
+	def toggle_vanilla_fallback(self):
+		want = self.fallback_var.get()
+		if not self.logic.mod_path:
+			messagebox.showerror("Error", "Mod path not selected.")
+			self._sync_fallback_var()
+			return
+		if want and not self.ensure_vanilla_path():
+			self._sync_fallback_var()
+			return
+		self.logic.set_vanilla_fallback(want)
+		self.save_config()
+		if want:
+			self.log_message("Vanilla fallback ON: files missing from the mod are read from vanilla and copied into the mod only when a change modifies them.", 'success')
+		else:
+			self.log_message("Vanilla fallback OFF: only files inside the mod are used.", 'info')
 
 	def toggle_auto_backup(self):
 		self.logic.auto_backup_enabled = self.autobackup_var.get()
@@ -11789,6 +12056,7 @@ class App(tk.Tk):
 		if folder:
 			self.path_var.set(folder)
 			self.logic.set_mod_path(folder)
+			self._sync_fallback_var()
 			self.save_config()
 			self.log_message(f"Selected Mod Path: {folder}")
 
@@ -13998,11 +14266,11 @@ class Vic3ProvincePainter(tk.Toplevel):
 			paths.append(os.path.join(self.logic.vanilla_path, "game/map_data/state_regions"))
 
 		for p in paths:
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
-					with open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
 						content = f.read()
 
 					# Parse STATE_NAME = { ... provinces = { "xHEX" ... } ... }
@@ -14048,11 +14316,11 @@ class Vic3ProvincePainter(tk.Toplevel):
 		# paths = [mod, vanilla] -> reverse to [vanilla, mod]
 
 		for p in reversed(paths):
-			if not os.path.exists(p): continue
-			for root, _, files in os.walk(p):
+			if not vfs_exists(p): continue
+			for root, _, files in vfs_walk(p, overlay=False):
 				for file in files:
 					if not file.endswith(".txt"): continue
-					with open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
+					with vfs_open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
 						content = f.read()
 
 					# s:STATE = { create_state = { country = c:TAG owned_provinces = { ... } } }
@@ -14120,11 +14388,11 @@ class Vic3ProvincePainter(tk.Toplevel):
 				# candidates.append(os.path.join(self.logic.vanilla_path, "game/map/data/provinces.png"))
 				candidates.append(os.path.join(self.logic.vanilla_path, "game/map_data/provinces.png"))
 
-			path = next((x for x in candidates if os.path.exists(x)), None)
+			path = next((x for x in candidates if vfs_exists(x)), None)
 			if not path:
 				raise FileNotFoundError("provinces.png not found")
 
-			self.original_map_image = Image.open(path)
+			self.original_map_image = Image.open(vfs_rp(path))
 			self.original_map_image.load() # Ensure loaded
 
 		# Downscale from original

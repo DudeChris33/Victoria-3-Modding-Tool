@@ -79,7 +79,17 @@ After the if/else, `new_inner_parts = [inner_reconstructed]` and `emptied_format
 | `find_strategic_region` | Runtime lookup of a state's strategic region from `common/strategic_regions/`. |
 | `get_character_home_region` | Looks up `home_region` for a character template from `common/character_templates/`. |
 | `scan_state_region_owners` | Returns list of bare tags that own land in a given state (reads mod + vanilla). |
-| `get_all_owned_states` | Returns list of states owned by a tag (mod only — reflects post-transfer state). |
+| `get_all_owned_states` | Returns list of states owned by a tag (mod files, plus unshadowed vanilla when vanilla fallback is on — reflects post-transfer state). |
+
+## Vanilla fallback (per-mod option)
+
+Module-level helpers above `class Vic3Logic` replace builtin file access everywhere: `vfs_open`, `vfs_exists`, `vfs_walk`, `vfs_listfiles`, `vfs_rp`, `vfs_key`. Never call bare `open(` / `os.path.exists(` / `os.walk(` on game files — use these.
+
+- Off (default): pass-through, except a walk of a vanilla dir skips files the mod shadows (same rel path or `replace_paths`).
+- On (`Vic3Logic.use_vanilla_fallback`, stored per mod in config.json `vanilla_fallback_mods`): mod dirs also yield vanilla files the mod lacks; writes to a vanilla-sourced file go to the mod path and only if content changed (`_VfsCowWriter`). Vanilla is never written.
+- Functions that already walk mod + vanilla themselves call `vfs_walk(mod_dir, overlay=False)` to avoid double reads.
+- `set_vanilla_path` stores the install root even if the user picked the `game/` folder (readers join `"game/..."`).
+- `prune_vanilla_copies.py` — one-off script that deletes mod files identical to vanilla.
 
 ## Building ownership system
 
